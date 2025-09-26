@@ -46,11 +46,15 @@ def test_update_folder_state(store: ConfigStore, tmp_path: Path) -> None:
         remote_id="remote",
         delta_link="delta",
         last_synced_at=timestamp,
+        last_status="success",
+        last_error=None,
     )
 
     updated = store.get_folders()[0]
     assert updated.delta_link == "delta"
     assert updated.last_synced_at == timestamp
+    assert updated.last_status == "success"
+    assert updated.last_error is None
 
 
 def test_update_folder_preferences(store: ConfigStore, tmp_path: Path) -> None:

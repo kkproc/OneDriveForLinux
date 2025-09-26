@@ -34,9 +34,9 @@
 - [x] Add optional CLI helper to install/uninstall the systemd units automatically. _(commands `install-systemd` and `uninstall-systemd`)_
 
 ## Phase 7 – Observability & Resilience
-- [ ] Implement structured logging with rotation (log to `~/.local/share/onedrive-sync/logs`).
-- [ ] Surface recent sync status in the UI, including last run time, successes, and errors.
-- [ ] Add notification hooks (DBus or libnotify) for notable events (auth expiry, sync failures).
+- [x] Implement structured logging with rotation (log to `~/.local/share/onedrive-sync/logs`).
+- [x] Surface recent sync status in the UI, including last run time, successes, and errors.
+- [x] Add notification hooks (DBus or libnotify) for notable events (auth expiry, sync failures).
 
 ## Phase 8 – Testing & QA
 - [ ] Write unit tests for Graph client, auth flows (mocked), config store, and sync engine using pytest and responses.

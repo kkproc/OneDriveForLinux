@@ -7,7 +7,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from app.storage.config_store import ConfigStore, FolderConfig
+from app.storage.config_store import ConfigStore, FolderConfig, SyncHistoryRecord
 from app.ui.models import FolderNode, FolderTreeModel
 from app.ui.settings_dialog import SettingsDialog
 
@@ -16,6 +16,7 @@ class MainWindow(QtWidgets.QMainWindow):
     load_children_requested = QtCore.Signal(object)
     selection_toggled = QtCore.Signal(object, bool, str, str, str)
     sync_requested = QtCore.Signal(object)
+    history_requested = QtCore.Signal(str, str)
 
     def __init__(
         self,
@@ -102,6 +103,11 @@ class MainWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(QtWidgets.QLabel("Selected Folders"))
         right_layout.addWidget(self.selected_list, stretch=1)
 
+        self.history_list = QtWidgets.QListWidget()
+        self.history_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        right_layout.addWidget(QtWidgets.QLabel("Recent Sync History"))
+        right_layout.addWidget(self.history_list, stretch=1)
+
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
@@ -135,6 +141,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 cfg.conflict_policy,
             )
         self._refresh_selected_list()
+        self.history_list.clear()
+
+    def update_history(self, display_name: str, records: List[SyncHistoryRecord]) -> None:
+        self.history_list.clear()
+        title = f"Recent Sync History – {display_name}"
+        header_item = QtWidgets.QListWidgetItem(title)
+        header_item.setFlags(QtCore.Qt.NoItemFlags)
+        self.history_list.addItem(header_item)
+        if not records:
+            empty_item = QtWidgets.QListWidgetItem("(No recent syncs)")
+            empty_item.setFlags(QtCore.Qt.NoItemFlags)
+            self.history_list.addItem(empty_item)
+            return
+        for record in records:
+            timestamp = record.finished_at.strftime("%Y-%m-%d %H:%M:%S")
+            message = f"{timestamp} • {record.status.upper()}"
+            if record.error_message:
+                message += f" – {record.error_message}"
+            item = QtWidgets.QListWidgetItem(message)
+            item.setFlags(QtCore.Qt.NoItemFlags)
+            if record.status.lower() == "error":
+                item.setForeground(QtGui.QBrush(QtGui.QColor("#ff6b6b")))
+            self.history_list.addItem(item)
 
     def append_children(self, parent: FolderNode, children: List[FolderNode]) -> None:
         self._model.insert_children(parent, children)
@@ -182,11 +211,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sync_button.setEnabled(in_selected)
         if in_selected:
             _, path, direction, conflict = self._selected_nodes[node.id]
-            self.path_label.setText(f"Local path: {path}\nDirection: {direction}\nConflict: {conflict}")
+            cfg = self.store.get_folder(node.id)
+            status_line = "Status: —"
+            if cfg and cfg.last_status:
+                status_line = f"Status: {cfg.last_status}"
+                if cfg.last_error:
+                    status_line += f"\nError: {cfg.last_error}"
+            self.path_label.setText(
+                f"Local path: {path}\nDirection: {direction}\nConflict: {conflict}\n{status_line}"
+            )
             self.path_button.setEnabled(True)
+            display_name = cfg.display_name if cfg else node.name
+            self.history_requested.emit(node.id, display_name)
         else:
             self.path_label.setText("Local path: —")
             self.path_button.setEnabled(False)
+            self.history_list.clear()
 
     def _toggle_selection(self) -> None:
         indexes = self.folder_tree.selectionModel().selectedIndexes()
@@ -202,6 +242,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sync_button.setEnabled(False)
             self.path_button.setEnabled(False)
             self.path_label.setText("Local path: —")
+            self.history_list.clear()
         else:
             default_dir = (Path.home() / "OneDriveSelective" / node.name).resolve()
             default_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -218,6 +259,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sync_button.setEnabled(True)
             self.path_button.setEnabled(True)
             self.path_label.setText(f"Local path: {path}\nDirection: {defaults_direction}\nConflict: {defaults_conflict}")
+            self.history_requested.emit(node.id, node.name)
         self._refresh_selected_list()
         self.select_button.setText("Remove from Sync" if node.id in self._selected_nodes else "Select for Sync")
 
@@ -237,6 +279,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selected_nodes[node.id] = (node, path, direction, conflict)
         self.path_label.setText(f"Local path: {path}\nDirection: {direction}\nConflict: {conflict}")
         self.selection_toggled.emit(node, True, str(path), direction, conflict)
+        self.history_requested.emit(node.id, node.name)
         self._refresh_selected_list()
 
     def _request_sync(self) -> None:

@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
-import os
 from contextlib import suppress
 from dataclasses import dataclass
-import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional
 
 from PySide6 import QtWidgets
 
 from app.graph.onedrive_client import DriveItem, OneDriveClient
+from app.services.notifier import Notification
 from app.storage.config_store import ConfigStore, FileState, FolderConfig
 
+from app.logging_utils import setup_logging
+
 logger = logging.getLogger(__name__)
-_env_level = os.getenv("SYNC_ENGINE_LOG_LEVEL", "INFO").upper()
-logger.setLevel(getattr(logging, _env_level, logging.INFO))
+setup_logging()
 
 
 @dataclass(slots=True)
@@ -69,6 +71,7 @@ class SyncEngine:
         token_provider: Callable[[], Awaitable[str]],
         store: ConfigStore,
         *,
+        notifier: Optional[Callable[[Notification], Awaitable[None]]] = None,
         download_chunk_size: int = 8,
     ) -> None:
         self._token_provider = token_provider
@@ -76,6 +79,7 @@ class SyncEngine:
         self._download_chunk_size = max(1, download_chunk_size)
         self._client: Optional[OneDriveClient] = None
         self.parent_widget: Optional[QtWidgets.QWidget] = None
+        self._notifier = notifier
 
     async def _ensure_client(self) -> OneDriveClient:
         if self._client is None:
@@ -117,10 +121,53 @@ class SyncEngine:
             remote_changes = await self._collect_full_listing(client, ctx)
         logger.debug("Collected %s remote changes for %s", len(remote_changes), cfg.remote_id)
 
-        await self._reconcile(client, ctx, local_changes, remote_changes)
+        status = "success"
+        error_message: Optional[str] = None
+        start_time = datetime.now(timezone.utc)
 
-        if ctx.delta_link:
-            self._store.update_folder_state(cfg.remote_id, delta_link=ctx.delta_link)
+        try:
+            await self._reconcile(client, ctx, local_changes, remote_changes)
+        except Exception as exc:  # noqa: BLE001
+            status = "error"
+            error_message = str(exc)
+            logger.exception("Sync failed for %s", cfg.display_name)
+            raise
+        else:
+            logger.info("Sync complete for %s", cfg.display_name)
+        finally:
+            finished_at = datetime.now(timezone.utc)
+            if ctx.delta_link:
+                self._store.update_folder_state(
+                    cfg.remote_id,
+                    delta_link=ctx.delta_link,
+                    last_synced_at=finished_at,
+                    last_status=status,
+                    last_error=error_message,
+                )
+            else:
+                self._store.update_folder_state(
+                    cfg.remote_id,
+                    last_synced_at=finished_at,
+                    last_status=status,
+                    last_error=error_message,
+                )
+            self._store.record_sync_event(
+                cfg.remote_id,
+                status,
+                finished_at=finished_at,
+                error_message=error_message,
+            )
+            if self._notifier:
+                try:
+                    await self._notifier(
+                        Notification(
+                            title=f"Sync {status}",
+                            message=f"{cfg.display_name}: {status}",
+                            urgency="critical" if status == "error" else "normal",
+                        )
+                    )
+                except Exception:  # pragma: no cover
+                    logger.exception("Failed to dispatch notification")
 
     def _detect_local_changes(self, ctx: SyncContext) -> Dict[str, LocalChange]:
         changes: Dict[str, LocalChange] = {}

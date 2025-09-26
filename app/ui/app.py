@@ -17,6 +17,7 @@ from app.ui.main_window import MainWindow
 from app.ui.models import FolderNode
 from app.storage.config_store import ConfigStore, FolderConfig
 from app.sync.engine import SyncEngine
+from app.services.notifier import Notification, Notifier, QtNotifier, connect_qt_notifier
 
 CLIENT_ID = "3f954ce5-c5e0-44b3-95dc-9a05a590a953"
 AUTHORITY = "https://login.microsoftonline.com/common"
@@ -89,7 +90,15 @@ def run() -> None:
     window.show()
     window._progress.show()
 
-    engine = SyncEngine(token_provider, store)
+    notifier = Notifier()
+    qt_notifier = QtNotifier()
+    connect_qt_notifier(notifier, qt_notifier)
+    qt_notifier.notification.connect(lambda event: window.set_status(event.message, 5000))
+
+    async def notification_callback(event: Notification) -> None:
+        notifier.dispatch(event)
+
+    engine = SyncEngine(token_provider, store, notifier=notification_callback)
     engine.parent_widget = window
 
     existing = store.get_folders()
@@ -128,8 +137,12 @@ def run() -> None:
                         conflict_policy=conflict,
                     )
                 )
+                cfg = store.get_folder(node.id)
+                if cfg:
+                    window.history_requested.emit(cfg.remote_id, cfg.display_name)
             else:
                 store.remove_folder(node.id)
+                window.history_requested.emit(node.id, node.name)
 
         async def run_sync(node: FolderNode) -> None:
             cfg = next((c for c in store.get_folders() if c.remote_id == node.id), None)
@@ -137,13 +150,20 @@ def run() -> None:
                 return
             await engine.sync_folder(cfg)
             window.set_status(f"Synced {node.name}")
+            history = store.get_recent_history(cfg.remote_id)
+            window.update_history(cfg.display_name, history)
 
         def trigger_sync(node: FolderNode) -> None:
             loop.create_task(run_sync(node))
 
+        def update_history(remote_id: str, display_name: str) -> None:
+            history = store.get_recent_history(remote_id)
+            window.update_history(display_name, history)
+
         window.load_children_requested.connect(schedule)
         window.selection_toggled.connect(handle_selection)
         window.sync_requested.connect(trigger_sync)
+        window.history_requested.connect(update_history)
         await load_children(od_client, node, window)
 
     with loop:
