@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app", "scripts"]
+
+[project]
+name = "onedrive-linux-sync"
+version = "0.1.0"
+description = "Selective OneDrive sync client for Linux with PySide6 UI"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+  {name = "Kevin", email = "kevin@example.com"}
+]
+dependencies = [
+  "msal>=1.28.0",
+  "httpx[http2]>=0.27.0",
+  "PySide6>=6.7.0",
+  "qasync>=0.24.0",
+  "SQLAlchemy>=2.0.0",
+  "keyring>=24.3.0",
+  "typer[all]>=0.12.0",
+  "pyqt6-stubs>=0.1.0",
+  "watchfiles>=0.20.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "black>=24.4",
+  "ruff>=0.6.0",
+  "mypy>=1.10.0",
+  "pytest>=8.2.0",
+  "pytest-qt>=4.4.0",
+  "pytest-asyncio>=0.23.0",
+  "responses>=0.25.0",
+  "types-requests>=2.32.0",
+  "types-python-dateutil>=2.9.0",
+  "pre-commit>=3.7.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/kevin/onedrive-linux-sync"
+Repository = "https://github.com/kevin/onedrive-linux-sync"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+select = ["E", "F", "I", "B", "Q", "UP"]
+ignore = ["E501"]
+
+[tool.typer]
+pretty_errors_enable = true
+
