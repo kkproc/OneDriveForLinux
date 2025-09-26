@@ -23,9 +23,13 @@ def setup_logging() -> None:
 
 
 async def _run() -> None:
+    import os
+    from dotenv import load_dotenv
+
+    load_dotenv()
     store = ConfigStore(Path("~/.local/share/onedrive-linux-sync/config.db").expanduser())
     cfg = AuthConfig(
-        client_id=Path("~/.config/onedrive-linux-sync/client_id.txt").expanduser().read_text().strip(),
+        client_id=os.environ["ONEDRIVE_CLIENT_ID"],
         authority="https://login.microsoftonline.com/common",
         scopes=["Files.ReadWrite.All", "User.Read"],
         cache_path=Path("~/.cache/onedrive-linux-sync/token_cache.json").expanduser(),

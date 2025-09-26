@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional
 from pathlib import Path
+from urllib.parse import quote
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
@@ -97,9 +99,17 @@ class OneDriveClient:
             raise GraphApiError(response.status_code, response.json())
         return await response.aread()
 
-    async def upload_item(self, folder_remote_id: str, local_path: Path, relative: Path) -> DriveItem:
-        relative_url = relative.as_posix().lstrip("/")
-        url = f"/me/drive/items/{folder_remote_id}:/{relative_url}:/$value" if relative_url else f"/me/drive/items/{folder_remote_id}/content"
+    async def upload_item(self, folder_remote_id: str, local_path: Path, relative: Path, drive_id: Optional[str] = None) -> DriveItem:
+        relative_parts = [quote(part, safe="") for part in relative.parts if part]
+        relative_url = "/".join(relative_parts)
+        if drive_id:
+            base = f"/drives/{drive_id}/items/{folder_remote_id}"
+        else:
+            base = f"/me/drive/items/{folder_remote_id}"
+        url = f"{base}:/{relative_url}:/content" if relative_url else f"{base}/content"
+        logging.getLogger(__name__).debug(
+            "Uploading to Graph - folder: %s, relative: %s, url: %s", folder_remote_id, relative, url
+        )
         token = await self._provider()
         with open(local_path, "rb") as handle:
             response = await self._client.put(
@@ -111,12 +121,24 @@ class OneDriveClient:
                 content=handle.read(),
             )
         if response.status_code >= 400:
-            raise GraphApiError(response.status_code, response.json())
+            payload = response.json()
+            logging.getLogger(__name__).error(
+                "Graph upload failed: status=%s payload=%s", response.status_code, payload
+            )
+            raise GraphApiError(response.status_code, payload)
         return self._to_drive_item(response.json())
 
-    async def delete_item(self, folder_remote_id: str, relative: Path) -> None:
-        relative_url = relative.as_posix().lstrip("/")
-        url = f"/me/drive/items/{folder_remote_id}:/{relative_url}" if relative_url else f"/me/drive/items/{folder_remote_id}"
+    async def delete_item(self, folder_remote_id: str, relative: Path, drive_id: Optional[str] = None) -> None:
+        relative_parts = [quote(part, safe="") for part in relative.parts if part]
+        relative_url = "/".join(relative_parts)
+        if drive_id:
+            base = f"/drives/{drive_id}/items/{folder_remote_id}"
+        else:
+            base = f"/me/drive/items/{folder_remote_id}"
+        url = f"{base}:/{relative_url}" if relative_url else base
+        logging.getLogger(__name__).debug(
+            "Deleting via Graph - folder: %s, relative: %s, url: %s", folder_remote_id, relative, url
+        )
         await self._request("DELETE", url)
 
     def _to_drive_item(self, data: Dict[str, Any]) -> DriveItem:

@@ -88,8 +88,8 @@ async def test_local_change_detection(store: ConfigStore, tmp_path: Path) -> Non
     cfg = FolderConfig(
         remote_id="root",
         drive_id="drive",
-        display_name="Docs",
-        local_path=tmp_path / "Docs",
+        display_name="DS Master",
+        local_path=tmp_path / "OneDriveSelective" / "drives" / "drive" / "root" / "DS Master",
         sync_direction="push",
         conflict_policy="local_wins",
     )
@@ -112,6 +112,49 @@ async def test_local_change_detection(store: ConfigStore, tmp_path: Path) -> Non
 
     await engine.sync_folder(cfg)
     client_mock.upload_item.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_upload_path_normalization(store: ConfigStore, tmp_path: Path) -> None:
+    cfg = FolderConfig(
+        remote_id="01REMOTE",
+        drive_id="b!fake",
+        display_name="DS Master",
+        local_path=tmp_path
+        / "OneDriveSelective"
+        / "drives"
+        / "b!fake"
+        / "root"
+        / "DS Master",
+        sync_direction="push",
+        conflict_policy="local_wins",
+    )
+    store.upsert_folder(cfg)
+
+    nested_dir = cfg.local_path / "Subfolder"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+    file_path = nested_dir / "example.png"
+    file_path.write_text("payload")
+
+    async def token_provider() -> str:
+        return "token"
+
+    engine = SyncEngine(token_provider, store)
+    client_mock = mock.AsyncMock()
+    uploaded_item = make_drive_item("example.png", False)
+    client_mock.upload_item = mock.AsyncMock(return_value=uploaded_item)
+    client_mock.delete_item = mock.AsyncMock(return_value=None)
+    client_mock.delta = mock.AsyncMock(return_value={"value": [], "@odata.deltaLink": "delta"})
+    engine._client = client_mock
+
+    await engine.sync_folder(cfg)
+
+    client_mock.upload_item.assert_awaited_once()
+    args, kwargs = client_mock.upload_item.call_args
+    assert args[0] == cfg.remote_id
+    assert args[1] == file_path
+    assert str(args[2]) == "Subfolder/example.png"
+    assert kwargs.get("drive_id") == cfg.drive_id
 
 
 async def _async_iter(sequence):

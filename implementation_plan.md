@@ -30,8 +30,8 @@
 
 ## Phase 6 – Background Service Integration
 - [x] Create a dedicated entry-point script `scripts/run_sync.py` that executes pending sync jobs for all selected folders and exits.
-- [ ] Provide instructions for installing a systemd user service and timer (`onedrive-sync.service` and `onedrive-sync.timer`) executing the script every 10 minutes using the project `.venv`. _(systemd install helper CLI in progress)_
-- [ ] Add optional CLI helper to install/uninstall the systemd units automatically.
+- [x] Provide instructions for installing a systemd user service and timer (`onedrive-sync.service` and `onedrive-sync.timer`) executing the script every 10 minutes using the project `.venv`. _(documented in README)_
+- [x] Add optional CLI helper to install/uninstall the systemd units automatically. _(commands `install-systemd` and `uninstall-systemd`)_
 
 ## Phase 7 – Observability & Resilience
 - [ ] Implement structured logging with rotation (log to `~/.local/share/onedrive-sync/logs`).

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import suppress
 from dataclasses import dataclass
 import hashlib
@@ -16,6 +17,8 @@ from app.graph.onedrive_client import DriveItem, OneDriveClient
 from app.storage.config_store import ConfigStore, FileState, FolderConfig
 
 logger = logging.getLogger(__name__)
+_env_level = os.getenv("SYNC_ENGINE_LOG_LEVEL", "INFO").upper()
+logger.setLevel(getattr(logging, _env_level, logging.INFO))
 
 
 @dataclass(slots=True)
@@ -96,10 +99,16 @@ class SyncEngine:
     async def sync_folder(self, cfg: FolderConfig) -> None:
         logger.info("Syncing folder %s", cfg.display_name)
         client = await self._ensure_client()
-        local_root = cfg.local_path
+        local_root = self._compute_local_root(cfg)
+        logger.debug("Computed local root for %s: %s", cfg.remote_id, local_root)
         local_root.mkdir(parents=True, exist_ok=True)
-
-        ctx = SyncContext(config=cfg, local_root=local_root, delta_link=cfg.delta_link)
+        logger.debug("Root exists after mkdir: %s", local_root.exists())
+        logger.debug("Immediate root contents: %s", list(local_root.iterdir()) if local_root.exists() else [])
+        ctx = SyncContext(
+            config=cfg,
+            local_root=local_root,
+            delta_link=cfg.delta_link,
+        )
         local_changes = self._detect_local_changes(ctx)
         logger.debug("Detected %s local changes for %s", len(local_changes), cfg.remote_id)
         if ctx.delta_link:
@@ -118,7 +127,9 @@ class SyncEngine:
         known_states = {state.relative_path.as_posix(): state for state in self._store.iter_file_states(ctx.config.remote_id)}
 
         walker = LocalWalker(ctx.local_root)
+        logger.debug("Scanning local root %s for changes", ctx.local_root)
         for path in walker.iter_files():
+            logger.debug("Inspecting local path: %s", path)
             relative = path.relative_to(ctx.local_root)
             key = relative.as_posix()
             state = known_states.pop(key, None)
@@ -129,6 +140,12 @@ class SyncEngine:
                 or (state.local_mtime and abs(state.local_mtime - mtime) > 1e-3)
                 or state.content_hash != current_hash
             ):
+                logger.debug(
+                    "Detected change - relative: %s, previous_state: %s, new_hash: %s",
+                    relative,
+                    state,
+                    current_hash,
+                )
                 changes[key] = LocalChange(
                     relative_path=relative,
                     absolute_path=path,
@@ -137,6 +154,7 @@ class SyncEngine:
                 )
 
         for key, state in known_states.items():
+            logger.debug("Detected deletion candidate: %s", key)
             changes[key] = LocalChange(
                 relative_path=Path(key),
                 absolute_path=ctx.local_root / key,
@@ -165,17 +183,17 @@ class SyncEngine:
 
     async def _collect_full_listing(self, client: OneDriveClient, ctx: SyncContext) -> List[RemoteChange]:
         collected: List[RemoteChange] = []
-        queue = [(ctx.config.remote_id, ctx.config.drive_id)]
+        queue = [(ctx.config.remote_id, ctx.config.drive_id, Path())]
         while queue:
-            remote_id, drive_id = queue.pop()
+            remote_id, drive_id, prefix = queue.pop()
             async for page in self._iter_children(client, remote_id, drive_id):
                 for item in page:
                     collected.append(RemoteChange(item=item, deleted=False))
                     if item.is_folder:
                         next_drive = item.parent_reference.get("driveId") if item.parent_reference else drive_id
-                        queue.append((item.id, next_drive))
+                        queue.append((item.id, next_drive, prefix / item.name))
                     else:
-                        dest = self._destination_path(ctx.local_root, item)
+                        dest = self._destination_path(ctx, item)
                         await self._download_item(client, item, dest)
                         self._record_file_state(ctx, item, dest)
         delta = self._normalize_delta(await client.delta(ctx.config.remote_id))
@@ -192,14 +210,14 @@ class SyncEngine:
         direction = ctx.config.sync_direction or "pull"
         conflict_policy = ctx.config.conflict_policy or "remote_wins"
         remote_map = {
-            self._destination_path(ctx.local_root, change.item).relative_to(ctx.local_root).as_posix(): change
+            self._destination_path(ctx, change.item).relative_to(ctx.local_root).as_posix(): change
             for change in remote_changes
         }
 
         for key, remote_change in remote_map.items():
             local_change = local_changes.pop(key, None)
             item = remote_change.item
-            dest = self._destination_path(ctx.local_root, item)
+            dest = self._destination_path(ctx, item)
             if local_change:
                 await self._resolve_conflict(client, ctx, local_change, remote_change, dest, direction, conflict_policy)
             else:
@@ -303,7 +321,7 @@ class SyncEngine:
             remote_id, drive_id = queue.pop()
             async for page in self._iter_children(client, remote_id, drive_id):
                 for item in page:
-                    dest = self._destination_path(ctx.local_root, item)
+                    dest = self._destination_path(ctx, item)
                     if item.is_folder:
                         dest.mkdir(parents=True, exist_ok=True)
                         next_drive = item.parent_reference.get("driveId") if item.parent_reference else drive_id
@@ -325,11 +343,11 @@ class SyncEngine:
             for item in payload.get("value", []):
                 if "deleted" in item:
                     drive_item = self._drive_item_from_dict(item)
-                    dest = self._destination_path(ctx.local_root, drive_item)
+                    dest = self._destination_path(ctx, drive_item)
                     self._handle_delete(dest)
                 else:
                     drive_item = self._drive_item_from_dict(item)
-                    dest = self._destination_path(ctx.local_root, drive_item)
+                    dest = self._destination_path(ctx, drive_item)
                     if drive_item.is_folder:
                         dest.mkdir(parents=True, exist_ok=True)
                     else:
@@ -356,13 +374,28 @@ class SyncEngine:
             e_tag=data.get("eTag"),
         )
 
-    def _destination_path(self, root: Path, item: DriveItem) -> Path:
-        parents = item.parent_reference.get("path", "") if item.parent_reference else ""
-        relative = Path(item.name)
-        if parents:
-            parts = [p for p in parents.split("/") if p and p not in ("drive", "root")]
-            relative = Path(*parts, item.name) if parts else Path(item.name)
-        return root / relative
+    def _destination_path(self, ctx: SyncContext, item: DriveItem) -> Path:
+        root = ctx.local_root
+        parent_reference = item.parent_reference or {}
+        parent_path = parent_reference.get("path") or parent_reference.get("parentReference", {}).get("path")
+        relative_parts: List[str]
+
+        if parent_path:
+            if "root:" in parent_path:
+                suffix = parent_path.split("root:", 1)[1]
+                relative_parts = [p for p in suffix.split("/") if p]
+            else:
+                relative_parts = [p for p in parent_path.split("/") if p]
+            if relative_parts and relative_parts[0] in {"drive", "drives"}:
+                relative_parts = relative_parts[2:]
+            if relative_parts and relative_parts[0] == ctx.config.display_name:
+                relative_parts = relative_parts[1:]
+        else:
+            relative_parts = []
+
+        local_dir = root.joinpath(*relative_parts)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        return local_dir / item.name
 
     def _handle_delete(self, dest: Path) -> None:
         if dest.exists():
@@ -389,7 +422,13 @@ class SyncEngine:
     async def _upload_item(self, client: OneDriveClient, ctx: SyncContext, path: Path, relative: Path) -> None:
         logger.debug("Uploading %s", path)
         remote_relative = self._remote_relative_path(ctx, relative)
-        result = await client.upload_item(ctx.config.remote_id, path, remote_relative)
+        logger.debug(
+            "Uploading file - absolute: %s, relative: %s, remote_relative: %s",
+            path,
+            relative,
+            remote_relative,
+        )
+        result = await client.upload_item(ctx.config.remote_id, path, remote_relative, drive_id=ctx.config.drive_id)
         content_hash = LocalWalker.hash_file(path)
         self._store.upsert_file_state(
             ctx.config.remote_id,
@@ -404,7 +443,12 @@ class SyncEngine:
     async def _delete_remote(self, client: OneDriveClient, ctx: SyncContext, change: LocalChange) -> None:
         logger.debug("Deleting remote item %s", change.relative_path)
         remote_relative = self._remote_relative_path(ctx, change.relative_path)
-        await client.delete_item(ctx.config.remote_id, remote_relative)
+        logger.debug(
+            "Deleting remote file - relative: %s, remote_relative: %s",
+            change.relative_path,
+            remote_relative,
+        )
+        await client.delete_item(ctx.config.remote_id, remote_relative, drive_id=ctx.config.drive_id)
         self._store.remove_file_state(ctx.config.remote_id, change.relative_path)
 
     def _record_file_state(self, ctx: SyncContext, item: DriveItem, dest: Path) -> None:
@@ -424,19 +468,57 @@ class SyncEngine:
         )
 
     def _remote_relative_path(self, ctx: SyncContext, relative: Path) -> Path:
-        rel_str = relative.as_posix()
-        if ctx.config.drive_id:
-            rel_str = rel_str.replace(f"drives/{ctx.config.drive_id}/", "")
-        rel_str = rel_str.replace("drives/", "")
-        rel_str = rel_str.replace("root:/", "")
-        rel_str = rel_str.replace("root:", "")
-        if rel_str.startswith(ctx.config.display_name + "/"):
-            rel_str = rel_str[len(ctx.config.display_name) + 1 :]
-        elif rel_str == ctx.config.display_name:
-            rel_str = ""
-        rel_str = rel_str.lstrip("/")
-        return Path(rel_str)
+        parts = [p for p in relative.parts if p]
+        drive_id = (ctx.config.drive_id or "").strip()
+        if drive_id and parts[:2] == ["drives", drive_id]:
+            parts = parts[2:]
+        if parts and parts[0] in {"root", "root:"}:
+            parts = parts[1:]
+        display = (ctx.config.display_name or "").strip()
+        if parts and display and self._normalize_part(parts[0]) == self._normalize_part(display):
+            parts = parts[1:]
+        return Path(*parts)
 
     async def run_headless(self) -> None:
         await self.sync_all()
         await self.close()
+
+    def _compute_local_root(self, cfg: FolderConfig) -> Path:
+        base = cfg.local_path
+        parts = [self._normalize_part(p) for p in base.parts]
+        if "drives" in parts or "root:" in parts:
+            return base
+
+        display = self._normalize_part((cfg.display_name or "").strip())
+        if parts and display and parts[-1] == display:
+            return base
+
+        segments: list[str] = []
+        drive_id = (cfg.drive_id or "").strip()
+        if drive_id:
+            segments.extend(["drives", drive_id])
+        segments.append("root:")
+        if display:
+            segments.append(cfg.display_name)
+
+        if not segments:
+            return base
+
+        return base.joinpath(*segments)
+
+    @staticmethod
+    def _path_endswith(path: Path, suffix: list[str]) -> bool:
+        if not suffix:
+            return True
+        parts = list(path.parts)
+        if len(parts) < len(suffix):
+            return False
+        normalized_parts = [SyncEngine._normalize_part(p) for p in parts[-len(suffix):]]
+        normalized_suffix = [SyncEngine._normalize_part(p) for p in suffix]
+        return normalized_parts == normalized_suffix
+
+    @staticmethod
+    def _normalize_part(part: str) -> str:
+        if part in {"root", "root:"}:
+            return "root:"
+        return part
