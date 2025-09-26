@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional
+from pathlib import Path
 
 import httpx
 
@@ -95,6 +96,28 @@ class OneDriveClient:
         if response.status_code >= 400:
             raise GraphApiError(response.status_code, response.json())
         return await response.aread()
+
+    async def upload_item(self, folder_remote_id: str, local_path: Path, relative: Path) -> DriveItem:
+        relative_url = relative.as_posix().lstrip("/")
+        url = f"/me/drive/items/{folder_remote_id}:/{relative_url}:/$value" if relative_url else f"/me/drive/items/{folder_remote_id}/content"
+        token = await self._provider()
+        with open(local_path, "rb") as handle:
+            response = await self._client.put(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/octet-stream",
+                },
+                content=handle.read(),
+            )
+        if response.status_code >= 400:
+            raise GraphApiError(response.status_code, response.json())
+        return self._to_drive_item(response.json())
+
+    async def delete_item(self, folder_remote_id: str, relative: Path) -> None:
+        relative_url = relative.as_posix().lstrip("/")
+        url = f"/me/drive/items/{folder_remote_id}:/{relative_url}" if relative_url else f"/me/drive/items/{folder_remote_id}"
+        await self._request("DELETE", url)
 
     def _to_drive_item(self, data: Dict[str, Any]) -> DriveItem:
         return DriveItem(

@@ -17,20 +17,20 @@
 
 ## Phase 4 – UI Layer
 - [x] Use PySide6 with QML or Qt Widgets to create a main window featuring navigation pane of drives, folder tree with on-demand expansion, and selection toggles.
-- [ ] Integrate styling (Qt Quick Controls 2 or custom stylesheet) for a modern, lightweight appearance.
+- [x] Integrate styling (Qt Quick Controls 2 or custom stylesheet) for a modern, lightweight appearance.
 - [x] Connect UI interactions to async data providers; ensure loading indicators during Graph fetches. _(progress indicator in status bar; further polish pending)_
 - [x] Implement workflow for selecting remote folders and binding them to user-chosen local directories; validate mappings and surface sync summaries.
 - [x] Implement settings view to manage login state, per-folder sync preferences (direction, conflict policy), and sync frequency (default 10 minutes).
 
 ## Phase 5 – Sync Scheduler & Engine
-- [ ] Develop `sync/engine.py` handling bidirectional sync per selected folder: compare remote metadata via delta queries, detect local changes via hashes and filesystem snapshots/watchers, and reconcile according to conflict rules. _(design in progress)_
-- [ ] Ensure sync routines are incremental, chunked, and resume-safe; cache minimal state (last delta link, etags, content hashes) per folder.
-- [ ] Implement conflict resolution module managing local-vs-remote precedence, version history, and user prompts when necessary.
-- [ ] Implement job orchestrator that can run headless, invoked by background service or UI-triggered manual sync.
+- [x] Develop `sync/engine.py` handling bidirectional sync per selected folder: compare remote metadata via delta queries, detect local changes via hashes and filesystem snapshots/watchers, and reconcile according to conflict rules. _(local hash tracking + conflict handling finalized)_
+- [x] Ensure sync routines are incremental, chunked, and resume-safe; cache minimal state (last delta link, etags, content hashes) per folder. _(content hashes & delta persistence wired)_
+- [x] Implement conflict resolution module managing local-vs-remote precedence, version history, and user prompts when necessary. _(prompt + headless fallbacks complete)_
+- [x] Implement job orchestrator that can run headless, invoked by background service or UI-triggered manual sync. _(shared headless runner powering CLI and service)_
 
 ## Phase 6 – Background Service Integration
-- [ ] Create a dedicated entry-point script `scripts/run_sync.py` that executes pending sync jobs for all selected folders and exits.
-- [ ] Provide instructions for installing a systemd user service and timer (`onedrive-sync.service` and `onedrive-sync.timer`) executing the script every 10 minutes using the project `.venv`.
+- [x] Create a dedicated entry-point script `scripts/run_sync.py` that executes pending sync jobs for all selected folders and exits.
+- [ ] Provide instructions for installing a systemd user service and timer (`onedrive-sync.service` and `onedrive-sync.timer`) executing the script every 10 minutes using the project `.venv`. _(systemd install helper CLI in progress)_
 - [ ] Add optional CLI helper to install/uninstall the systemd units automatically.
 
 ## Phase 7 – Observability & Resilience

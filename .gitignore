@@ -1,3 +1,5 @@
+.config/onedrive-linux-sync/
+.local/share/onedrive-linux-sync/
 # Virtual environments
 .venv/
 

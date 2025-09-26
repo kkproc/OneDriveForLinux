@@ -6,12 +6,16 @@ from pathlib import Path
 from typing import List, Optional
 
 import typer
+import asyncio
+import sys
 
 from app.auth.msal_client import AuthConfig, MSALClient
 from app.storage.config_store import ConfigStore, FolderConfig
 from app.ui.app import run as run_ui
+from app.sync.engine import SyncEngine
+from scripts.run_sync import main as run_headless_sync
 
-app = typer.Typer(help="Manage authentication and selective OneDrive folders.")
+app = typer.Typer(help="Manage authentication, folder selections, and syncing.")
 folders_app = typer.Typer(help="Manage synced folder mappings.")
 app.add_typer(folders_app, name="folders")
 
@@ -261,6 +265,52 @@ def remove_folder(
     store = get_config_store(db_path)
     store.remove_folder(remote_id)
     typer.secho(f"Removed folder mapping for {remote_id}", fg=typer.colors.GREEN)
+
+
+@app.command()
+def sync_all() -> None:
+    """Run sync for all selected folders (headless)."""
+    run_headless_sync()
+
+
+@app.command()
+def install_systemd(
+    service_name: str = "onedrive-sync",
+    interval_minutes: int = 10,
+) -> None:
+    """Install systemd user service and timer for periodic sync."""
+
+    systemd_dir = Path.home() / ".config/systemd/user"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+
+    service_unit = systemd_dir / f"{service_name}.service"
+    timer_unit = systemd_dir / f"{service_name}.timer"
+
+    run_sync_path = Path(__file__).resolve().parent / "run_sync.py"
+    service_unit.write_text(
+        f"""[Unit]\nDescription=OneDrive Sync Service\n\n[Service]\nExecStart={sys.executable} {run_sync_path}\n"""
+    )
+    timer_unit.write_text(
+        f"""[Unit]\nDescription=Run OneDrive Sync every {interval_minutes} minutes\n\n[Timer]\nOnUnitActiveSec={interval_minutes * 60}\nUnit={service_name}.service\n\n[Install]\nWantedBy=timers.target\n"""
+    )
+
+    typer.echo(f"Created {service_unit} and {timer_unit}")
+    typer.echo(f"Run: systemctl --user daemon-reload && systemctl --user enable --now {service_name}.timer")
+
+
+@app.command()
+def uninstall_systemd(service_name: str = "onedrive-sync") -> None:
+    """Remove systemd user service and timer."""
+
+    systemd_dir = Path.home() / ".config/systemd/user"
+    service_unit = systemd_dir / f"{service_name}.service"
+    timer_unit = systemd_dir / f"{service_name}.timer"
+
+    for unit in (service_unit, timer_unit):
+        if unit.exists():
+            unit.unlink()
+            typer.echo(f"Removed {unit}")
+    typer.echo(f"Run: systemctl --user daemon-reload && systemctl --user disable --now {service_name}.timer")
 
 
 def main() -> None:

@@ -48,6 +48,7 @@ class SyncedItem(Base):
     etag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_modified: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     local_mtime: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    content_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 def ensure_schema(engine) -> None:
@@ -58,6 +59,10 @@ def ensure_schema(engine) -> None:
             conn.execute(text("ALTER TABLE synced_folders ADD COLUMN sync_direction TEXT DEFAULT 'pull'"))
         if "conflict_policy" not in columns:
             conn.execute(text("ALTER TABLE synced_folders ADD COLUMN conflict_policy TEXT DEFAULT 'remote_wins'"))
+        result = conn.execute(text("PRAGMA table_info('synced_items')"))
+        item_columns = {row[1] for row in result}
+        if "content_hash" not in item_columns:
+            conn.execute(text("ALTER TABLE synced_items ADD COLUMN content_hash TEXT"))
         conn.commit()
 
 
@@ -82,6 +87,7 @@ class FileState:
     etag: Optional[str]
     last_modified: Optional[str]
     local_mtime: Optional[float]
+    content_hash: Optional[str]
 
 
 class ConfigStore:
@@ -92,17 +98,7 @@ class ConfigStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{db_path}", future=True)
         Base.metadata.create_all(self.engine)
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        with self.engine.connect() as conn:
-            result = conn.execute(text("PRAGMA table_info('synced_folders')"))
-            columns = {row[1] for row in result}
-            if "sync_direction" not in columns:
-                conn.execute(text("ALTER TABLE synced_folders ADD COLUMN sync_direction TEXT DEFAULT 'pull'"))
-            if "conflict_policy" not in columns:
-                conn.execute(text("ALTER TABLE synced_folders ADD COLUMN conflict_policy TEXT DEFAULT 'remote_wins'"))
-            conn.commit()
+        ensure_schema(self.engine)
 
     @contextmanager
     def session(self) -> Iterator[Session]:
@@ -222,6 +218,7 @@ class ConfigStore:
         etag: Optional[str],
         last_modified: Optional[str],
         local_mtime: Optional[float],
+        content_hash: Optional[str],
     ) -> None:
         relative_str = str(relative_path)
         with self.session() as session:
@@ -236,6 +233,7 @@ class ConfigStore:
                 state.etag = etag
                 state.last_modified = last_modified
                 state.local_mtime = local_mtime
+                state.content_hash = content_hash
             else:
                 session.add(
                     SyncedItem(
@@ -245,6 +243,7 @@ class ConfigStore:
                         etag=etag,
                         last_modified=last_modified,
                         local_mtime=local_mtime,
+                        content_hash=content_hash,
                     )
                 )
 
@@ -265,7 +264,26 @@ class ConfigStore:
                 etag=state.etag,
                 last_modified=state.last_modified,
                 local_mtime=state.local_mtime,
+                content_hash=state.content_hash,
             )
+
+    def iter_file_states(self, folder_remote_id: str) -> list[FileState]:
+        with Session(self.engine, future=True) as session:
+            rows = session.scalars(
+                select(SyncedItem).where(SyncedItem.folder_remote_id == folder_remote_id)
+            ).all()
+        return [
+            FileState(
+                folder_remote_id=row.folder_remote_id,
+                item_id=row.item_id,
+                relative_path=Path(row.relative_path),
+                etag=row.etag,
+                last_modified=row.last_modified,
+                local_mtime=row.local_mtime,
+                content_hash=row.content_hash,
+            )
+            for row in rows
+        ]
 
     def remove_file_state(self, folder_remote_id: str, relative_path: Path) -> None:
         with self.session() as session:

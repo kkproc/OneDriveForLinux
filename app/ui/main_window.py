@@ -48,6 +48,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         toolbar = self.addToolBar("Main")
         toolbar.setMovable(False)
+        sync_action = QtGui.QAction("Sync Now", self)
+        sync_action.triggered.connect(self._trigger_current_sync)
+        toolbar.addAction(sync_action)
         settings_action = QtGui.QAction("Settings", self)
         settings_action.triggered.connect(self._open_settings)
         toolbar.addAction(settings_action)
@@ -65,6 +68,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.folder_tree = QtWidgets.QTreeView()
         self.folder_tree.setHeaderHidden(True)
+        self.folder_tree.setStyleSheet("QTreeView { background: #1e1e1e; color: #d4d4d4; } QTreeView::item:selected { background: #264f78; }")
         splitter.addWidget(self.folder_tree)
 
         right_panel = QtWidgets.QWidget()
@@ -108,7 +112,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_bar.showMessage(message, timeout)
 
     def populate_root(self, children: List[FolderNode]) -> None:
+        self._progress.show()
         self._model.set_root_children(children)
+        for child in children:
+            child.is_loading = False
+        self._progress.hide()
 
     def set_selected_nodes(self, configs: List[FolderConfig]) -> None:
         self._selected_nodes.clear()
@@ -131,7 +139,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def append_children(self, parent: FolderNode, children: List[FolderNode]) -> None:
         self._model.insert_children(parent, children)
         parent.is_loading = False
-        self._progress.hide()
+        if not any(node.is_loading for node in self._root_node.children):
+            self._progress.hide()
 
     def _handle_expand(self, index: QtCore.QModelIndex) -> None:
         pass
@@ -246,3 +255,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = SettingsDialog(self.store, self)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
             dialog.save()
+
+    def _trigger_current_sync(self) -> None:
+        if self._current_node and self._current_node.id in self._selected_nodes:
+            self.sync_requested.emit(self._current_node)

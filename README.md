@@ -11,6 +11,16 @@ pip install --upgrade pip
 pip install -e .[dev]
 ```
 
+## Headless Sync & Scheduling
+
+- Run manual sync: `python -m scripts.cli sync-all`
+- Install systemd timer:
+  ```bash
+  python -m scripts.cli install-systemd
+  systemctl --user daemon-reload
+  systemctl --user enable --now onedrive-sync.timer
+  ```
+
 ## Development Tasks
 - See `implementation_plan.md` for the roadmap.
 

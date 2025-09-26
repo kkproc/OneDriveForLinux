@@ -1,15 +1,19 @@
-"""Sync engine handling pull synchronization from OneDrive to local folders."""
+"""Sync engine handling synchronization between OneDrive and local folders."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, Optional
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional
+
+from PySide6 import QtWidgets
 
 from app.graph.onedrive_client import DriveItem, OneDriveClient
-from app.storage.config_store import ConfigStore, FolderConfig
+from app.storage.config_store import ConfigStore, FileState, FolderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -21,17 +25,54 @@ class SyncContext:
     delta_link: Optional[str]
 
 
+@dataclass(slots=True)
+class LocalChange:
+    relative_path: Path
+    absolute_path: Path
+    state: Optional[FileState]
+    content_hash: Optional[str]
+
+
+@dataclass(slots=True)
+class RemoteChange:
+    item: DriveItem
+    deleted: bool = False
+
+
+class LocalWalker:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def iter_files(self) -> Iterable[Path]:
+        if not self.root.exists():
+            return []
+        return (path for path in self.root.glob("**/*") if path.is_file())
+
+    @staticmethod
+    def hash_file(path: Path) -> Optional[str]:
+        hasher = hashlib.blake2b(digest_size=16)
+        try:
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except FileNotFoundError:
+            return None
+
+
 class SyncEngine:
     def __init__(
         self,
         token_provider: Callable[[], Awaitable[str]],
         store: ConfigStore,
+        *,
         download_chunk_size: int = 8,
     ) -> None:
         self._token_provider = token_provider
         self._store = store
-        self._download_chunk_size = download_chunk_size
+        self._download_chunk_size = max(1, download_chunk_size)
         self._client: Optional[OneDriveClient] = None
+        self.parent_widget: Optional[QtWidgets.QWidget] = None
 
     async def _ensure_client(self) -> OneDriveClient:
         if self._client is None:
@@ -59,24 +100,188 @@ class SyncEngine:
         local_root.mkdir(parents=True, exist_ok=True)
 
         ctx = SyncContext(config=cfg, local_root=local_root, delta_link=cfg.delta_link)
+        local_changes = self._detect_local_changes(ctx)
+        logger.debug("Detected %s local changes for %s", len(local_changes), cfg.remote_id)
         if ctx.delta_link:
-            await self._process_delta(client, ctx)
+            remote_changes = await self._collect_remote_changes(client, ctx)
         else:
-            await self._full_sync(client, ctx)
+            remote_changes = await self._collect_full_listing(client, ctx)
+        logger.debug("Collected %s remote changes for %s", len(remote_changes), cfg.remote_id)
 
-    def _record_file_state(self, ctx: SyncContext, item: DriveItem, dest: Path) -> None:
-        etag = item.e_tag
-        last_modified = item.last_modified
-        mtime = dest.stat().st_mtime if dest.exists() else None
-        relative = dest.relative_to(ctx.local_root)
-        self._store.upsert_file_state(
-            ctx.config.remote_id,
-            item.id,
-            relative,
-            etag=etag,
-            last_modified=last_modified,
-            local_mtime=mtime,
-        )
+        await self._reconcile(client, ctx, local_changes, remote_changes)
+
+        if ctx.delta_link:
+            self._store.update_folder_state(cfg.remote_id, delta_link=ctx.delta_link)
+
+    def _detect_local_changes(self, ctx: SyncContext) -> Dict[str, LocalChange]:
+        changes: Dict[str, LocalChange] = {}
+        known_states = {state.relative_path.as_posix(): state for state in self._store.iter_file_states(ctx.config.remote_id)}
+
+        walker = LocalWalker(ctx.local_root)
+        for path in walker.iter_files():
+            relative = path.relative_to(ctx.local_root)
+            key = relative.as_posix()
+            state = known_states.pop(key, None)
+            mtime = path.stat().st_mtime
+            current_hash = walker.hash_file(path)
+            if (
+                not state
+                or (state.local_mtime and abs(state.local_mtime - mtime) > 1e-3)
+                or state.content_hash != current_hash
+            ):
+                changes[key] = LocalChange(
+                    relative_path=relative,
+                    absolute_path=path,
+                    state=state,
+                    content_hash=current_hash,
+                )
+
+        for key, state in known_states.items():
+            changes[key] = LocalChange(
+                relative_path=Path(key),
+                absolute_path=ctx.local_root / key,
+                state=state,
+                content_hash=None,
+            )
+
+        return changes
+
+    async def _collect_remote_changes(self, client: OneDriveClient, ctx: SyncContext) -> List[RemoteChange]:
+        delta_link = ctx.delta_link
+        collected: List[RemoteChange] = []
+        last_delta = delta_link
+        while delta_link:
+            payload = self._normalize_delta(await client.delta(ctx.config.remote_id, delta_link=delta_link))
+            delta_link = payload.get("@odata.nextLink")
+            last_delta = payload.get("@odata.deltaLink") or last_delta
+            for item in payload.get("value", []):
+                deleted = item.get("deleted") is not None
+                drive_item = self._drive_item_from_dict(item)
+                collected.append(RemoteChange(item=drive_item, deleted=deleted))
+        if last_delta:
+            ctx.delta_link = last_delta
+            self._store.update_folder_state(ctx.config.remote_id, delta_link=last_delta)
+        return collected
+
+    async def _collect_full_listing(self, client: OneDriveClient, ctx: SyncContext) -> List[RemoteChange]:
+        collected: List[RemoteChange] = []
+        queue = [(ctx.config.remote_id, ctx.config.drive_id)]
+        while queue:
+            remote_id, drive_id = queue.pop()
+            async for page in self._iter_children(client, remote_id, drive_id):
+                for item in page:
+                    collected.append(RemoteChange(item=item, deleted=False))
+                    if item.is_folder:
+                        next_drive = item.parent_reference.get("driveId") if item.parent_reference else drive_id
+                        queue.append((item.id, next_drive))
+                    else:
+                        dest = self._destination_path(ctx.local_root, item)
+                        await self._download_item(client, item, dest)
+                        self._record_file_state(ctx, item, dest)
+        delta = self._normalize_delta(await client.delta(ctx.config.remote_id))
+        ctx.delta_link = delta.get("@odata.deltaLink")
+        return collected
+
+    async def _reconcile(
+        self,
+        client: OneDriveClient,
+        ctx: SyncContext,
+        local_changes: Dict[str, LocalChange],
+        remote_changes: List[RemoteChange],
+    ) -> None:
+        direction = ctx.config.sync_direction or "pull"
+        conflict_policy = ctx.config.conflict_policy or "remote_wins"
+        remote_map = {
+            self._destination_path(ctx.local_root, change.item).relative_to(ctx.local_root).as_posix(): change
+            for change in remote_changes
+        }
+
+        for key, remote_change in remote_map.items():
+            local_change = local_changes.pop(key, None)
+            item = remote_change.item
+            dest = self._destination_path(ctx.local_root, item)
+            if local_change:
+                await self._resolve_conflict(client, ctx, local_change, remote_change, dest, direction, conflict_policy)
+            else:
+                if direction in ("pull", "bidirectional"):
+                    if remote_change.deleted:
+                        self._handle_delete(dest)
+                        self._store.remove_file_state(ctx.config.remote_id, dest.relative_to(ctx.local_root))
+                    elif item.is_folder:
+                        dest.mkdir(parents=True, exist_ok=True)
+                    else:
+                        await self._download_item(client, item, dest)
+                        self._record_file_state(ctx, item, dest)
+
+        for key, local_change in local_changes.items():  # remaining local operations
+            path = local_change.absolute_path
+            relative = local_change.relative_path
+            if local_change.state and not path.exists():
+                if direction in ("push", "bidirectional"):
+                    await self._delete_remote(client, ctx, local_change)
+                self._store.remove_file_state(ctx.config.remote_id, relative)
+            elif path.exists() and direction in ("push", "bidirectional"):
+                await self._upload_item(client, ctx, path, relative)
+
+    async def _resolve_conflict(
+        self,
+        client: OneDriveClient,
+        ctx: SyncContext,
+        local_change: LocalChange,
+        remote_change: RemoteChange,
+        dest: Path,
+        direction: str,
+        conflict_policy: str,
+    ) -> None:
+        item = remote_change.item
+        local_exists = local_change.absolute_path.exists()
+        remote_deleted = remote_change.deleted
+
+        if conflict_policy == "remote_wins" or direction == "pull":
+            if remote_deleted:
+                self._handle_delete(dest)
+                self._store.remove_file_state(ctx.config.remote_id, local_change.relative_path)
+            elif item.is_folder:
+                dest.mkdir(parents=True, exist_ok=True)
+            else:
+                await self._download_item(client, item, dest)
+                self._record_file_state(ctx, item, dest)
+        elif conflict_policy == "local_wins" or direction == "push":
+            if local_exists:
+                await self._upload_item(client, ctx, local_change.absolute_path, local_change.relative_path)
+            else:
+                await self._delete_remote(client, ctx, local_change)
+        else:
+            choice = self._prompt_conflict(local_change.relative_path)
+            if choice == "remote":
+                await self._download_item(client, item, dest)
+                self._record_file_state(ctx, item, dest)
+            elif choice == "local":
+                if local_exists:
+                    await self._upload_item(client, ctx, local_change.absolute_path, local_change.relative_path)
+                else:
+                    await self._delete_remote(client, ctx, local_change)
+            else:
+                logger.info("Conflict skipped for %s", local_change.relative_path)
+
+    def _prompt_conflict(self, relative: Path) -> str:
+        app = QtWidgets.QApplication.instance()
+        if self.parent_widget is None and not app:
+            return "remote"
+        if self.parent_widget is None:
+            return "remote"
+        box = QtWidgets.QMessageBox(self.parent_widget)
+        box.setWindowTitle("Sync Conflict")
+        box.setText(f"Conflict detected for {relative}.")
+        remote_button = box.addButton("Use Remote", QtWidgets.QMessageBox.AcceptRole)
+        local_button = box.addButton("Use Local", QtWidgets.QMessageBox.AcceptRole)
+        box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.exec()
+        if box.clickedButton() == local_button:
+            return "local"
+        if box.clickedButton() == remote_button:
+            return "remote"
+        return "skip"
 
     async def _iter_children(self, client: OneDriveClient, remote_id: str, drive_id: Optional[str]):
         result = client.list_children(remote_id, drive_id=drive_id)
@@ -133,6 +338,11 @@ class SyncEngine:
         if last_delta:
             self._store.update_folder_state(ctx.config.remote_id, delta_link=last_delta)
 
+    def _normalize_delta(self, result) -> Dict:
+        if isinstance(result, dict):
+            return result
+        return {}
+
     def _drive_item_from_dict(self, data: dict) -> DriveItem:
         parent_ref = data.get("parentReference", {}) or {}
         return DriveItem(
@@ -175,3 +385,58 @@ class SyncEngine:
             handle.write(content)
         temp.replace(dest)
         logger.debug("Downloaded %s", dest)
+
+    async def _upload_item(self, client: OneDriveClient, ctx: SyncContext, path: Path, relative: Path) -> None:
+        logger.debug("Uploading %s", path)
+        remote_relative = self._remote_relative_path(ctx, relative)
+        result = await client.upload_item(ctx.config.remote_id, path, remote_relative)
+        content_hash = LocalWalker.hash_file(path)
+        self._store.upsert_file_state(
+            ctx.config.remote_id,
+            result.id,
+            relative,
+            etag=result.e_tag,
+            last_modified=result.last_modified,
+            local_mtime=path.stat().st_mtime,
+            content_hash=content_hash,
+        )
+
+    async def _delete_remote(self, client: OneDriveClient, ctx: SyncContext, change: LocalChange) -> None:
+        logger.debug("Deleting remote item %s", change.relative_path)
+        remote_relative = self._remote_relative_path(ctx, change.relative_path)
+        await client.delete_item(ctx.config.remote_id, remote_relative)
+        self._store.remove_file_state(ctx.config.remote_id, change.relative_path)
+
+    def _record_file_state(self, ctx: SyncContext, item: DriveItem, dest: Path) -> None:
+        etag = item.e_tag
+        last_modified = item.last_modified
+        mtime = dest.stat().st_mtime if dest.exists() else None
+        relative = dest.relative_to(ctx.local_root)
+        content_hash = LocalWalker.hash_file(dest) if dest.exists() else None
+        self._store.upsert_file_state(
+            ctx.config.remote_id,
+            item.id,
+            relative,
+            etag=etag,
+            last_modified=last_modified,
+            local_mtime=mtime,
+            content_hash=content_hash,
+        )
+
+    def _remote_relative_path(self, ctx: SyncContext, relative: Path) -> Path:
+        rel_str = relative.as_posix()
+        if ctx.config.drive_id:
+            rel_str = rel_str.replace(f"drives/{ctx.config.drive_id}/", "")
+        rel_str = rel_str.replace("drives/", "")
+        rel_str = rel_str.replace("root:/", "")
+        rel_str = rel_str.replace("root:", "")
+        if rel_str.startswith(ctx.config.display_name + "/"):
+            rel_str = rel_str[len(ctx.config.display_name) + 1 :]
+        elif rel_str == ctx.config.display_name:
+            rel_str = ""
+        rel_str = rel_str.lstrip("/")
+        return Path(rel_str)
+
+    async def run_headless(self) -> None:
+        await self.sync_all()
+        await self.close()

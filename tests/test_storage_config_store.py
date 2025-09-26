@@ -90,6 +90,7 @@ def test_file_state_roundtrip(store: ConfigStore, tmp_path: Path) -> None:
         etag="etag1",
         last_modified="2025-09-26T00:00:00Z",
         local_mtime=123.45,
+        content_hash="hash",
     )
     store.upsert_file_state(
         state.folder_remote_id,
@@ -98,6 +99,7 @@ def test_file_state_roundtrip(store: ConfigStore, tmp_path: Path) -> None:
         etag=state.etag,
         last_modified=state.last_modified,
         local_mtime=state.local_mtime,
+        content_hash=state.content_hash,
     )
 
     loaded = store.get_file_state("folder", Path("Sub/File1.txt"))

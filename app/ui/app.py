@@ -90,6 +90,7 @@ def run() -> None:
     window._progress.show()
 
     engine = SyncEngine(token_provider, store)
+    engine.parent_widget = window
 
     existing = store.get_folders()
     window.set_selected_nodes(existing)
