@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -90,14 +91,30 @@ class OneDriveClient:
             url = f"/drives/{drive_id}/items/{item_id}/content"
         else:
             url = f"/me/drive/items/{item_id}/content"
-        response = await self._client.get(
-            url,
-            headers={"Authorization": f"Bearer {await self._provider()}"},
-            follow_redirects=True,
-        )
-        if response.status_code >= 400:
-            raise GraphApiError(response.status_code, response.json())
-        return await response.aread()
+
+        last_error: Optional[BaseException] = None
+        for attempt in range(3):
+            try:
+                response = await self._client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {await self._provider()}"},
+                    follow_redirects=True,
+                )
+                if response.status_code >= 400:
+                    raise GraphApiError(response.status_code, response.json())
+                return await response.aread()
+            except (httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                last_error = exc
+                logging.getLogger(__name__).warning(
+                    "Retrying download for item %s (attempt %s/3) after %s",
+                    item_id,
+                    attempt + 1,
+                    exc,
+                )
+                await asyncio.sleep(0.5 * (attempt + 1))
+        if last_error:
+            raise last_error
+        raise RuntimeError("Download failed without specific error")
 
     async def upload_item(self, folder_remote_id: str, local_path: Path, relative: Path, drive_id: Optional[str] = None) -> DriveItem:
         relative_parts = [quote(part, safe="") for part in relative.parts if part]
@@ -152,4 +169,3 @@ class OneDriveClient:
             last_modified=data.get("lastModifiedDateTime", ""),
             e_tag=data.get("eTag"),
         )
-

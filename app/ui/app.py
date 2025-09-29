@@ -260,8 +260,18 @@ def run() -> None:
         )
         if not cfg:
             return
-        await engine.sync_folder(cfg)
-        window.set_status(f"Synced {node.name}")
+        window.set_sync_activity(f"Syncing {cfg.display_name}…", success=None)
+        try:
+            await engine.sync_folder(cfg)
+        except Exception as exc:  # noqa: BLE001
+            error_name = type(exc).__name__
+            detail = str(exc).strip()
+            message = f"{error_name}: {detail}" if detail else error_name
+            window.set_status(f"Sync failed ({message})", 7000)
+            window.set_sync_activity(f"{message} – {cfg.display_name}", success=False)
+        else:
+            window.set_status(f"Synced {node.name}")
+            window.set_sync_activity(f"Synced {cfg.display_name}", success=True)
         history = store.get_recent_history(cfg.account_id, cfg.remote_id)
         window.update_history(cfg.display_name, history)
         window.refresh_account_status(cfg.account_id)

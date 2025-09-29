@@ -72,6 +72,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("Ready")
+        self._status_indicator = QtWidgets.QLabel("Idle")
+        font = self._status_indicator.font()
+        font.setPointSize(font.pointSize() - 1)
+        self._status_indicator.setFont(font)
+        self._status_indicator.setStyleSheet("color: #9ca3af;")
+        self.status_bar.addPermanentWidget(self._status_indicator)
         self._progress = QtWidgets.QProgressBar()
         self._progress.setMaximumWidth(150)
         self._progress.setRange(0, 0)
@@ -166,6 +172,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def set_status(self, message: str, timeout: int = 3000) -> None:
         self.status_bar.showMessage(message, timeout)
+
+    def set_sync_activity(self, message: str, *, success: bool | None = None) -> None:
+        if success is None:
+            self._status_indicator.setStyleSheet("color: #fbbf24;")
+        elif success:
+            self._status_indicator.setStyleSheet("color: #22c55e;")
+        else:
+            self._status_indicator.setStyleSheet("color: #ef4444;")
+        self._status_indicator.setText(message)
 
     def apply_active_account(self, account: AccountRecord) -> None:
         self.active_account = account

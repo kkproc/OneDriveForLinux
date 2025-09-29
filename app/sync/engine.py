@@ -131,7 +131,8 @@ class SyncEngine:
             await self._reconcile(client, ctx, local_changes, remote_changes)
         except Exception as exc:  # noqa: BLE001
             status = "error"
-            error_message = str(exc)
+            detail = str(exc).strip()
+            error_message = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
             logger.exception("Sync failed for %s", cfg.display_name)
             raise
         else:
