@@ -6,7 +6,7 @@ from unittest import mock
 import pytest
 
 from app.graph.onedrive_client import DriveItem
-from app.storage.config_store import ConfigStore, FolderConfig
+from app.storage.config_store import ConfigStore, FolderConfig, AccountRecord
 from app.sync.engine import SyncEngine
 
 
@@ -18,7 +18,10 @@ def store(tmp_path: Path) -> ConfigStore:
 
 @pytest.mark.asyncio
 async def test_sync_folder_full_download(store: ConfigStore, tmp_path: Path) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
     cfg = FolderConfig(
+        account_id=account.id,
         remote_id="root",
         drive_id="drive",
         display_name="Docs",
@@ -29,7 +32,7 @@ async def test_sync_folder_full_download(store: ConfigStore, tmp_path: Path) -> 
     async def token_provider() -> str:
         return "token"
 
-    engine = SyncEngine(token_provider, store)
+    engine = SyncEngine(token_provider, store, account_id=account.id)
 
     client_mock = mock.AsyncMock()
     client_mock.list_children.return_value = _async_iter([[make_drive_item("file1", False)]])
@@ -41,12 +44,15 @@ async def test_sync_folder_full_download(store: ConfigStore, tmp_path: Path) -> 
 
     dest = cfg.local_path / "file1"
     assert dest.exists() and dest.read_bytes() == b"content"
-    assert store.get_folders()[0].delta_link == "delta"
+    assert store.get_folders(account_id=account.id)[0].delta_link == "delta"
 
 
 @pytest.mark.asyncio
 async def test_sync_folder_delta(store: ConfigStore, tmp_path: Path) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
     cfg = FolderConfig(
+        account_id=account.id,
         remote_id="root",
         drive_id="drive",
         display_name="Docs",
@@ -58,7 +64,7 @@ async def test_sync_folder_delta(store: ConfigStore, tmp_path: Path) -> None:
     async def token_provider() -> str:
         return "token"
 
-    engine = SyncEngine(token_provider, store)
+    engine = SyncEngine(token_provider, store, account_id=account.id)
 
     delta_payload = {
         "value": [
@@ -80,12 +86,15 @@ async def test_sync_folder_delta(store: ConfigStore, tmp_path: Path) -> None:
     await engine.sync_folder(cfg)
 
     assert (cfg.local_path / "file1").read_bytes() == b"data"
-    assert store.get_folders()[0].delta_link == "delta2"
+    assert store.get_folders(account_id=account.id)[0].delta_link == "delta2"
 
 
 @pytest.mark.asyncio
 async def test_local_change_detection(store: ConfigStore, tmp_path: Path) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
     cfg = FolderConfig(
+        account_id=account.id,
         remote_id="root",
         drive_id="drive",
         display_name="DS Master",
@@ -102,7 +111,7 @@ async def test_local_change_detection(store: ConfigStore, tmp_path: Path) -> Non
     async def token_provider() -> str:
         return "token"
 
-    engine = SyncEngine(token_provider, store)
+    engine = SyncEngine(token_provider, store, account_id=account.id)
     client_mock = mock.AsyncMock()
     uploaded_item = make_drive_item("file1", False)
     client_mock.upload_item = mock.AsyncMock(return_value=uploaded_item)
@@ -116,7 +125,10 @@ async def test_local_change_detection(store: ConfigStore, tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_upload_path_normalization(store: ConfigStore, tmp_path: Path) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
     cfg = FolderConfig(
+        account_id=account.id,
         remote_id="01REMOTE",
         drive_id="b!fake",
         display_name="DS Master",
@@ -139,7 +151,7 @@ async def test_upload_path_normalization(store: ConfigStore, tmp_path: Path) -> 
     async def token_provider() -> str:
         return "token"
 
-    engine = SyncEngine(token_provider, store)
+    engine = SyncEngine(token_provider, store, account_id=account.id)
     client_mock = mock.AsyncMock()
     uploaded_item = make_drive_item("example.png", False)
     client_mock.upload_item = mock.AsyncMock(return_value=uploaded_item)

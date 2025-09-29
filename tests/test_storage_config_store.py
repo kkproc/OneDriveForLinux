@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.storage.config_store import ConfigStore, FolderConfig, FileState
+from app.storage.config_store import ConfigStore, FolderConfig, FileState, AccountRecord
 
 
 @pytest.fixture
@@ -15,7 +15,10 @@ def store(tmp_path: Path) -> ConfigStore:
 
 
 def test_upsert_and_retrieve_folder(store: ConfigStore, tmp_path: Path) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
     folder = FolderConfig(
+        account_id=account.id,
         remote_id="remote",
         drive_id="drive",
         display_name="Docs",
@@ -26,6 +29,7 @@ def test_upsert_and_retrieve_folder(store: ConfigStore, tmp_path: Path) -> None:
     folders = store.get_folders()
     assert len(folders) == 1
     retrieved = folders[0]
+    assert retrieved.account_id == account.id
     assert retrieved.remote_id == folder.remote_id
     assert retrieved.local_path == folder.local_path
     assert retrieved.sync_direction == "pull"
@@ -33,7 +37,10 @@ def test_upsert_and_retrieve_folder(store: ConfigStore, tmp_path: Path) -> None:
 
 
 def test_update_folder_state(store: ConfigStore, tmp_path: Path) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
     folder = FolderConfig(
+        account_id=account.id,
         remote_id="remote",
         drive_id="drive",
         display_name="Docs",
@@ -43,6 +50,7 @@ def test_update_folder_state(store: ConfigStore, tmp_path: Path) -> None:
 
     timestamp = datetime.now(timezone.utc)
     store.update_folder_state(
+        account_id=account.id,
         remote_id="remote",
         delta_link="delta",
         last_synced_at=timestamp,
@@ -50,7 +58,7 @@ def test_update_folder_state(store: ConfigStore, tmp_path: Path) -> None:
         last_error=None,
     )
 
-    updated = store.get_folders()[0]
+    updated = store.get_folders(account_id=account.id)[0]
     assert updated.delta_link == "delta"
     assert updated.last_synced_at == timestamp
     assert updated.last_status == "success"
@@ -58,7 +66,10 @@ def test_update_folder_state(store: ConfigStore, tmp_path: Path) -> None:
 
 
 def test_update_folder_preferences(store: ConfigStore, tmp_path: Path) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
     folder = FolderConfig(
+        account_id=account.id,
         remote_id="remote",
         drive_id="drive",
         display_name="Docs",
@@ -66,8 +77,8 @@ def test_update_folder_preferences(store: ConfigStore, tmp_path: Path) -> None:
     )
     store.upsert_folder(folder)
 
-    store.update_folder_preferences("remote", sync_direction="bidirectional", conflict_policy="local_wins")
-    updated = store.get_folders()[0]
+    store.update_folder_preferences(account.id, "remote", sync_direction="bidirectional", conflict_policy="local_wins")
+    updated = store.get_folders(account_id=account.id)[0]
     assert updated.sync_direction == "bidirectional"
     assert updated.conflict_policy == "local_wins"
 
@@ -77,9 +88,18 @@ def test_preferences(store: ConfigStore) -> None:
     store.set_preference("sync_frequency", "10")
     assert store.get_preference("sync_frequency") == "10"
 
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
+    assert store.get_preference("sync_frequency", account_id=account.id) is None
+    store.set_preference("sync_frequency", "15", account_id=account.id)
+    assert store.get_preference("sync_frequency", account_id=account.id) == "15"
+
 
 def test_file_state_roundtrip(store: ConfigStore, tmp_path: Path) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
     cfg = FolderConfig(
+        account_id=account.id,
         remote_id="folder",
         drive_id="drive",
         display_name="Docs",
@@ -88,6 +108,7 @@ def test_file_state_roundtrip(store: ConfigStore, tmp_path: Path) -> None:
     store.upsert_folder(cfg)
 
     state = FileState(
+        account_id=account.id,
         folder_remote_id="folder",
         item_id="file1",
         relative_path=Path("Sub/File1.txt"),
@@ -97,6 +118,7 @@ def test_file_state_roundtrip(store: ConfigStore, tmp_path: Path) -> None:
         content_hash="hash",
     )
     store.upsert_file_state(
+        account.id,
         state.folder_remote_id,
         state.item_id,
         state.relative_path,
@@ -106,9 +128,9 @@ def test_file_state_roundtrip(store: ConfigStore, tmp_path: Path) -> None:
         content_hash=state.content_hash,
     )
 
-    loaded = store.get_file_state("folder", Path("Sub/File1.txt"))
+    loaded = store.get_file_state(account.id, "folder", Path("Sub/File1.txt"))
     assert loaded == state
 
-    store.remove_file_state("folder", Path("Sub/File1.txt"))
-    assert store.get_file_state("folder", Path("Sub/File1.txt")) is None
+    store.remove_file_state(account.id, "folder", Path("Sub/File1.txt"))
+    assert store.get_file_state(account.id, "folder", Path("Sub/File1.txt")) is None
 

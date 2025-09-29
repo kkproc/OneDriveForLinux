@@ -184,18 +184,23 @@ def ui() -> None:
 
 @folders_app.command("list")
 def list_folders(
+    account_id: Optional[str] = typer.Option(
+        None,
+        "--account-id",
+        help="Filter folders for a specific account (defaults to primary).",
+    ),
     db_path: Path = typer.Option(
         DEFAULT_DB_PATH,
         "--db-path",
         envvar="ONEDRIVE_DB_PATH",
         help="Path to the configuration database.",
         show_default=True,
-    )
+    ),
 ) -> None:
     """List synced folders and their local mappings."""
 
     store = get_config_store(db_path)
-    folders = store.get_folders()
+    folders = store.get_folders(account_id=account_id)
     if not folders:
         typer.echo("No folders configured.")
         return
@@ -216,6 +221,11 @@ def add_folder(
         help="Friendly name shown in UI. Defaults to remote ID.",
     ),
     local_path: Path = typer.Option(..., "--local-path", help="Local directory to sync to."),
+    account_id: Optional[str] = typer.Option(
+        None,
+        "--account-id",
+        help="Account identifier that owns the folder (defaults to primary).",
+    ),
     include_subfolders: bool = typer.Option(
         True,
         "--include-subfolders/--no-include-subfolders",
@@ -236,6 +246,7 @@ def add_folder(
     name = display_name or remote_id
     store.upsert_folder(
         FolderConfig(
+            account_id=account_id or "default",
             remote_id=remote_id,
             drive_id=drive_id,
             display_name=name,
@@ -252,6 +263,11 @@ def add_folder(
 @folders_app.command("remove")
 def remove_folder(
     remote_id: str = typer.Argument(..., help="Remote OneDrive item ID."),
+    account_id: Optional[str] = typer.Option(
+        None,
+        "--account-id",
+        help="Account identifier owning the mapping (defaults to primary).",
+    ),
     db_path: Path = typer.Option(
         DEFAULT_DB_PATH,
         "--db-path",
@@ -263,7 +279,7 @@ def remove_folder(
     """Remove a synced folder mapping."""
 
     store = get_config_store(db_path)
-    store.remove_folder(remote_id)
+    store.remove_folder(account_id or "default", remote_id)
     typer.secho(f"Removed folder mapping for {remote_id}", fg=typer.colors.GREEN)
 
 

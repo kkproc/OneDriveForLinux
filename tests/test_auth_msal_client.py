@@ -28,6 +28,32 @@ def test_silent_token_return_none_when_no_account(temp_cache_path: Path) -> None
         assert client.acquire_token_silent() is None
 
 
+def test_silent_token_filters_by_account(temp_cache_path: Path) -> None:
+    config = AuthConfig(
+        client_id="client",
+        authority="https://login.microsoftonline.com/common",
+        scopes=["user.read"],
+        cache_path=temp_cache_path,
+    )
+
+    with mock.patch.object(MSALClient, "_load_cache"):
+        client = MSALClient(config)
+
+    target_account = {"home_account_id": "home.1", "username": "user@example.com"}
+    other_account = {"home_account_id": "home.2", "username": "other@example.com"}
+
+    with mock.patch.object(client.app, "get_accounts", return_value=[target_account, other_account]):
+        with mock.patch.object(
+            client.app,
+            "acquire_token_silent",
+            return_value={"access_token": "token"},
+        ) as acquire_mock:
+            result = client.acquire_token_silent(account_id="home.1")
+
+    assert result == {"access_token": "token"}
+    acquire_mock.assert_called_once_with(config.scopes, account=target_account)
+
+
 def test_persist_cache_writes_file_and_keyring(temp_cache_path: Path) -> None:
     config = AuthConfig(
         client_id="client",

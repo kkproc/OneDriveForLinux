@@ -82,6 +82,9 @@ def test_add_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     )
     assert result.exit_code == 0
     store_mock.upsert_folder.assert_called_once()
+    args, kwargs = store_mock.upsert_folder.call_args
+    folder_cfg = args[0]
+    assert folder_cfg.account_id == "default"
 
 
 def test_remove_folder(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -93,7 +96,7 @@ def test_remove_folder(monkeypatch: pytest.MonkeyPatch) -> None:
         ["folders", "remove", "remote"],
     )
     assert result.exit_code == 0
-    store_mock.remove_folder.assert_called_once_with("remote")
+    store_mock.remove_folder.assert_called_once_with("default", "remote")
 
 
 def test_ui_command(monkeypatch: pytest.MonkeyPatch) -> None:

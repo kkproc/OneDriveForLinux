@@ -7,7 +7,8 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from app.storage.config_store import ConfigStore, FolderConfig, SyncHistoryRecord
+from app.storage.config_store import AccountRecord, ConfigStore, FolderConfig, SyncHistoryRecord
+from app.ui.dialogs import AddAccountDialog
 from app.ui.models import FolderNode, FolderTreeModel
 from app.ui.settings_dialog import SettingsDialog
 
@@ -17,22 +18,31 @@ class MainWindow(QtWidgets.QMainWindow):
     selection_toggled = QtCore.Signal(object, bool, str, str, str)
     sync_requested = QtCore.Signal(object)
     history_requested = QtCore.Signal(str, str)
+    account_created = QtCore.Signal(dict)
+    account_switch_requested = QtCore.Signal(str)
+    account_remove_requested = QtCore.Signal(str)
 
     def __init__(
         self,
         store: ConfigStore,
+        active_account: AccountRecord,
         token_provider: Callable[[], Awaitable[str]] | None = None,
+        device_flow_handler: Optional[Callable[[], tuple[dict, Callable[[], dict]]]] = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("OneDrive Selective Sync")
         self.resize(1200, 768)
 
         self.store = store
+        self.active_account = active_account
         self.token_provider = token_provider
+        self._device_flow_handler = device_flow_handler
         self._root_node = FolderNode(id="root", name="OneDrive", drive_id=None, is_folder=True)
         self._model = FolderTreeModel(self._root_node)
         self._selected_nodes: Dict[str, Tuple[FolderNode, Path, str, str]] = {}
         self._current_node: Optional[FolderNode] = None
+        self._accounts: List[AccountRecord] = []
+        self._suppress_account_change = False
 
         self._init_ui()
         self.folder_tree.setModel(self._model)
@@ -52,6 +62,9 @@ class MainWindow(QtWidgets.QMainWindow):
         sync_action = QtGui.QAction("Sync Now", self)
         sync_action.triggered.connect(self._trigger_current_sync)
         toolbar.addAction(sync_action)
+        add_account_action = QtGui.QAction("Add Account", self)
+        add_account_action.triggered.connect(self._show_add_account_dialog)
+        toolbar.addAction(add_account_action)
         settings_action = QtGui.QAction("Settings", self)
         settings_action.triggered.connect(self._open_settings)
         toolbar.addAction(settings_action)
@@ -66,6 +79,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         splitter = QtWidgets.QSplitter()
         splitter.setOrientation(QtCore.Qt.Horizontal)
+
+        accounts_panel = QtWidgets.QWidget()
+        accounts_layout = QtWidgets.QVBoxLayout(accounts_panel)
+        accounts_layout.addWidget(QtWidgets.QLabel("Accounts"))
+        self.account_list = QtWidgets.QListWidget()
+        self.account_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.account_list.currentRowChanged.connect(self._handle_account_selection)
+        accounts_layout.addWidget(self.account_list)
+        self.remove_account_button = QtWidgets.QPushButton("Remove")
+        self.remove_account_button.clicked.connect(self._remove_selected_account)
+        accounts_layout.addWidget(self.remove_account_button)
+        accounts_layout.addStretch(1)
+        splitter.addWidget(accounts_panel)
 
         self.folder_tree = QtWidgets.QTreeView()
         self.folder_tree.setHeaderHidden(True)
@@ -110,12 +136,48 @@ class MainWindow(QtWidgets.QMainWindow):
 
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(2, 2)
 
         self.setCentralWidget(splitter)
+        self._update_remove_button_state()
+
+    def set_accounts(self, accounts: List[AccountRecord]) -> None:
+        self._accounts = accounts
+        self._suppress_account_change = True
+        self.account_list.blockSignals(True)
+        self.account_list.clear()
+        current_index = -1
+        for index, account in enumerate(accounts):
+            item = QtWidgets.QListWidgetItem(account.display_name)
+            item.setData(QtCore.Qt.UserRole, account)
+            self.account_list.addItem(item)
+            if account.id == self.active_account.id:
+                current_index = index
+        if current_index >= 0:
+            self.account_list.setCurrentRow(current_index)
+        elif self.account_list.count() > 0:
+            self.account_list.setCurrentRow(0)
+        self.account_list.blockSignals(False)
+        self._suppress_account_change = False
+        self._update_remove_button_state()
 
     def set_status(self, message: str, timeout: int = 3000) -> None:
         self.status_bar.showMessage(message, timeout)
+
+    def apply_active_account(self, account: AccountRecord) -> None:
+        self.active_account = account
+        self.setWindowTitle(f"OneDrive Selective Sync – {account.display_name}")
+        self._suppress_account_change = True
+        for row in range(self.account_list.count()):
+            item = self.account_list.item(row)
+            item_account: AccountRecord = item.data(QtCore.Qt.UserRole)
+            if item_account and item_account.id == account.id:
+                self.account_list.setCurrentRow(row)
+                break
+        self._suppress_account_change = False
+        self.history_list.clear()
+        self._update_remove_button_state()
 
     def populate_root(self, children: List[FolderNode]) -> None:
         self._progress.show()
@@ -142,6 +204,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self._refresh_selected_list()
         self.history_list.clear()
+        self._update_remove_button_state()
 
     def update_history(self, display_name: str, records: List[SyncHistoryRecord]) -> None:
         self.history_list.clear()
@@ -166,20 +229,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self.history_list.addItem(item)
 
     def append_children(self, parent: FolderNode, children: List[FolderNode]) -> None:
+        if not children:
+            parent.fetched = True
+            self._progress.hide()
+            return
         self._model.insert_children(parent, children)
         parent.is_loading = False
+        index = self._model.index_for_node(parent)
+        if index.isValid():
+            self.folder_tree.expand(index)
         if not any(node.is_loading for node in self._root_node.children):
             self._progress.hide()
 
+    def _request_children(self, node: FolderNode) -> None:
+        if not node.is_folder or node.is_loading or node.fetched:
+            return
+        node.is_loading = True
+        self._progress.show()
+        self.load_children_requested.emit(node)
+
     def _handle_expand(self, index: QtCore.QModelIndex) -> None:
-        pass
+        if not index.isValid():
+            return
+        node: FolderNode = index.internalPointer()
+        self._request_children(node)
 
     def _handle_double_click(self, index: QtCore.QModelIndex) -> None:
+        if not index.isValid():
+            return
         node: FolderNode = index.internalPointer()
         if node.is_folder and not node.fetched:
-            node.is_loading = True
-            self._progress.show()
-            self.load_children_requested.emit(node)
+            self._request_children(node)
+            return
         elif node.is_folder:
             if self.folder_tree.isExpanded(index):
                 self.folder_tree.collapse(index)
@@ -211,7 +292,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sync_button.setEnabled(in_selected)
         if in_selected:
             _, path, direction, conflict = self._selected_nodes[node.id]
-            cfg = self.store.get_folder(node.id)
+            cfg = self.store.get_folder(self.active_account.id, node.id)
             status_line = "Status: —"
             if cfg and cfg.last_status:
                 status_line = f"Status: {cfg.last_status}"
@@ -233,8 +314,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not indexes:
             return
         node: FolderNode = indexes[0].internalPointer()
-        defaults_direction = self.store.get_preference("default_direction") or "pull"
-        defaults_conflict = self.store.get_preference("default_conflict") or "remote_wins"
+        defaults_direction = (
+            self.store.get_preference("default_direction", account_id=self.active_account.id)
+            or "pull"
+        )
+        defaults_conflict = (
+            self.store.get_preference("default_conflict", account_id=self.active_account.id)
+            or "remote_wins"
+        )
         currently_selected = node.id in self._selected_nodes
         if currently_selected:
             self._selected_nodes.pop(node.id, None)
@@ -295,10 +382,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self._progress.hide()
 
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self.store, self)
+        dialog = SettingsDialog(self.store, self.active_account.id, self)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
             dialog.save()
+
+    def update_account(self, account: AccountRecord, token_provider: Callable[[], Awaitable[str]] | None) -> None:
+        self.active_account = account
+        self.token_provider = token_provider
+
+    def update_account(self, account: AccountRecord, token_provider: Callable[[], Awaitable[str]] | None) -> None:
+        self.active_account = account
+        self.token_provider = token_provider
 
     def _trigger_current_sync(self) -> None:
         if self._current_node and self._current_node.id in self._selected_nodes:
             self.sync_requested.emit(self._current_node)
+
+    def _handle_account_selection(self, row: int) -> None:
+        if self._suppress_account_change or row < 0:
+            return
+        item = self.account_list.item(row)
+        if not item:
+            return
+        account: AccountRecord = item.data(QtCore.Qt.UserRole)
+        if not account or account.id == self.active_account.id:
+            self._update_remove_button_state()
+            return
+        self.account_switch_requested.emit(account.id)
+        self._update_remove_button_state()
+
+    def _remove_selected_account(self) -> None:
+        item = self.account_list.currentItem()
+        if not item or self.account_list.count() <= 1:
+            return
+        account: AccountRecord = item.data(QtCore.Qt.UserRole)
+        if not account:
+            return
+        self.account_remove_requested.emit(account.id)
+
+    def _update_remove_button_state(self) -> None:
+        can_remove = self.account_list.count() > 1 and self.account_list.currentItem() is not None
+        self.remove_account_button.setEnabled(can_remove)
+
+    def _show_add_account_dialog(self) -> None:
+        if not self._device_flow_handler:
+            QtWidgets.QMessageBox.information(self, "Unavailable", "Device login is not configured for this build.")
+            return
+        dialog = AddAccountDialog(self, device_flow_handler=self._device_flow_handler)
+        dialog.account_added.connect(self.account_created.emit)
+        dialog.exec()

@@ -38,13 +38,18 @@
 - [x] Surface recent sync status in the UI, including last run time, successes, and errors.
 - [x] Add notification hooks (DBus or libnotify) for notable events (auth expiry, sync failures).
 
-## Phase 8 – Testing & QA
+## Phase 8 – Multi-Account Management
+- [x] Extend authentication flows to support maintaining distinct sessions for personal and business tenants simultaneously. _(device-flow now captures `home_account_id` and tokens persist per account; UI account switching verified)_
+- [x] Update config storage to persist per-account folder selections, sync policies, and delta state independently.
+- [ ] Enhance UI to show account switcher, per-account status indicators, and consolidated notifications. _(account list and switching work; remaining work: status badges + notification aggregation)_
+- [ ] Ensure scheduler and sync engine isolate jobs per account while sharing backoff and throttling logic. _(UI switches engine context per account; headless runner still needs multi-account iteration)_
+
+## Phase 9 – Testing & QA
 - [ ] Write unit tests for Graph client, auth flows (mocked), config store, and sync engine using pytest and responses.
 - [ ] Add UI smoke tests leveraging `pytest-qt` if feasible; otherwise manual test checklist.
 - [ ] Document manual test scenarios: login, folder selection, incremental sync, offline recovery.
 
-## Phase 9 – Packaging & Distribution
+## Phase 10 – Packaging & Distribution
 - [ ] Create a launcher script/desktop entry for the UI integrating with freedesktop.
 - [ ] Bundle requirements via `pip-tools` or `poetry export`; provide instructions for packaging as AppImage or Flatpak.
 - [ ] Draft README with setup instructions, background service installation, troubleshooting, and MS Graph app registration steps.
-

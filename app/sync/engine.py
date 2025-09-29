@@ -15,7 +15,7 @@ from PySide6 import QtWidgets
 
 from app.graph.onedrive_client import DriveItem, OneDriveClient
 from app.services.notifier import Notification
-from app.storage.config_store import ConfigStore, FileState, FolderConfig
+from app.storage.config_store import ConfigStore, FileState, FolderConfig, DEFAULT_ACCOUNT_ID
 
 from app.logging_utils import setup_logging
 
@@ -71,6 +71,7 @@ class SyncEngine:
         token_provider: Callable[[], Awaitable[str]],
         store: ConfigStore,
         *,
+        account_id: Optional[str] = None,
         notifier: Optional[Callable[[Notification], Awaitable[None]]] = None,
         download_chunk_size: int = 8,
     ) -> None:
@@ -80,6 +81,7 @@ class SyncEngine:
         self._client: Optional[OneDriveClient] = None
         self.parent_widget: Optional[QtWidgets.QWidget] = None
         self._notifier = notifier
+        self._account_id = account_id or DEFAULT_ACCOUNT_ID
 
     async def _ensure_client(self) -> OneDriveClient:
         if self._client is None:
@@ -92,7 +94,7 @@ class SyncEngine:
             self._client = None
 
     async def sync_all(self) -> None:
-        folders = self._store.get_folders()
+        folders = self._store.get_folders(self._account_id)
         if not folders:
             logger.info("No folders selected for sync")
             return
@@ -138,6 +140,7 @@ class SyncEngine:
             finished_at = datetime.now(timezone.utc)
             if ctx.delta_link:
                 self._store.update_folder_state(
+                    cfg.account_id,
                     cfg.remote_id,
                     delta_link=ctx.delta_link,
                     last_synced_at=finished_at,
@@ -146,12 +149,14 @@ class SyncEngine:
                 )
             else:
                 self._store.update_folder_state(
+                    cfg.account_id,
                     cfg.remote_id,
                     last_synced_at=finished_at,
                     last_status=status,
                     last_error=error_message,
                 )
             self._store.record_sync_event(
+                cfg.account_id,
                 cfg.remote_id,
                 status,
                 finished_at=finished_at,
@@ -171,7 +176,10 @@ class SyncEngine:
 
     def _detect_local_changes(self, ctx: SyncContext) -> Dict[str, LocalChange]:
         changes: Dict[str, LocalChange] = {}
-        known_states = {state.relative_path.as_posix(): state for state in self._store.iter_file_states(ctx.config.remote_id)}
+        known_states = {
+            state.relative_path.as_posix(): state
+            for state in self._store.iter_file_states(ctx.config.account_id, ctx.config.remote_id)
+        }
 
         walker = LocalWalker(ctx.local_root)
         logger.debug("Scanning local root %s for changes", ctx.local_root)
@@ -225,7 +233,7 @@ class SyncEngine:
                 collected.append(RemoteChange(item=drive_item, deleted=deleted))
         if last_delta:
             ctx.delta_link = last_delta
-            self._store.update_folder_state(ctx.config.remote_id, delta_link=last_delta)
+            self._store.update_folder_state(ctx.config.account_id, ctx.config.remote_id, delta_link=last_delta)
         return collected
 
     async def _collect_full_listing(self, client: OneDriveClient, ctx: SyncContext) -> List[RemoteChange]:
@@ -245,6 +253,8 @@ class SyncEngine:
                         self._record_file_state(ctx, item, dest)
         delta = self._normalize_delta(await client.delta(ctx.config.remote_id))
         ctx.delta_link = delta.get("@odata.deltaLink")
+        if ctx.delta_link:
+            self._store.update_folder_state(ctx.config.account_id, ctx.config.remote_id, delta_link=ctx.delta_link)
         return collected
 
     async def _reconcile(
@@ -271,7 +281,11 @@ class SyncEngine:
                 if direction in ("pull", "bidirectional"):
                     if remote_change.deleted:
                         self._handle_delete(dest)
-                        self._store.remove_file_state(ctx.config.remote_id, dest.relative_to(ctx.local_root))
+                        self._store.remove_file_state(
+                            ctx.config.account_id,
+                            ctx.config.remote_id,
+                            dest.relative_to(ctx.local_root),
+                        )
                     elif item.is_folder:
                         dest.mkdir(parents=True, exist_ok=True)
                     else:
@@ -284,7 +298,7 @@ class SyncEngine:
             if local_change.state and not path.exists():
                 if direction in ("push", "bidirectional"):
                     await self._delete_remote(client, ctx, local_change)
-                self._store.remove_file_state(ctx.config.remote_id, relative)
+                self._store.remove_file_state(ctx.config.account_id, ctx.config.remote_id, relative)
             elif path.exists() and direction in ("push", "bidirectional"):
                 await self._upload_item(client, ctx, path, relative)
 
@@ -305,7 +319,11 @@ class SyncEngine:
         if conflict_policy == "remote_wins" or direction == "pull":
             if remote_deleted:
                 self._handle_delete(dest)
-                self._store.remove_file_state(ctx.config.remote_id, local_change.relative_path)
+                self._store.remove_file_state(
+                    ctx.config.account_id,
+                    ctx.config.remote_id,
+                    local_change.relative_path,
+                )
             elif item.is_folder:
                 dest.mkdir(parents=True, exist_ok=True)
             else:
@@ -377,7 +395,11 @@ class SyncEngine:
                         await self._download_item(client, item, dest)
                         self._record_file_state(ctx, item, dest)
         delta = await client.delta(ctx.config.remote_id)
-        self._store.update_folder_state(ctx.config.remote_id, delta_link=delta.get("@odata.deltaLink"))
+        self._store.update_folder_state(
+            ctx.config.account_id,
+            ctx.config.remote_id,
+            delta_link=delta.get("@odata.deltaLink"),
+        )
 
     async def _process_delta(self, client: OneDriveClient, ctx: SyncContext) -> None:
         delta_link = ctx.delta_link
@@ -401,7 +423,7 @@ class SyncEngine:
                         await self._download_item(client, drive_item, dest)
                         self._record_file_state(ctx, drive_item, dest)
         if last_delta:
-            self._store.update_folder_state(ctx.config.remote_id, delta_link=last_delta)
+            self._store.update_folder_state(ctx.config.account_id, ctx.config.remote_id, delta_link=last_delta)
 
     def _normalize_delta(self, result) -> Dict:
         if isinstance(result, dict):
@@ -478,6 +500,7 @@ class SyncEngine:
         result = await client.upload_item(ctx.config.remote_id, path, remote_relative, drive_id=ctx.config.drive_id)
         content_hash = LocalWalker.hash_file(path)
         self._store.upsert_file_state(
+            ctx.config.account_id,
             ctx.config.remote_id,
             result.id,
             relative,
@@ -496,7 +519,7 @@ class SyncEngine:
             remote_relative,
         )
         await client.delete_item(ctx.config.remote_id, remote_relative, drive_id=ctx.config.drive_id)
-        self._store.remove_file_state(ctx.config.remote_id, change.relative_path)
+        self._store.remove_file_state(ctx.config.account_id, ctx.config.remote_id, change.relative_path)
 
     def _record_file_state(self, ctx: SyncContext, item: DriveItem, dest: Path) -> None:
         etag = item.e_tag
@@ -505,6 +528,7 @@ class SyncEngine:
         relative = dest.relative_to(ctx.local_root)
         content_hash = LocalWalker.hash_file(dest) if dest.exists() else None
         self._store.upsert_file_state(
+            ctx.config.account_id,
             ctx.config.remote_id,
             item.id,
             relative,

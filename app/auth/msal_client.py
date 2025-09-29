@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import keyring
 import msal
@@ -38,15 +38,20 @@ class MSALClient:
             token_cache=self._cache,
         )
 
-    def acquire_token_interactive(self) -> Dict[str, Any]:
-        result = self.app.acquire_token_interactive(scopes=self.config.scopes)
+    def acquire_token_interactive(self, *, login_hint: Optional[str] = None) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {}
+        if login_hint:
+            extra["login_hint"] = login_hint
+        result = self.app.acquire_token_interactive(scopes=self.config.scopes, **extra)
         self._persist_cache()
         return result
 
-    def acquire_token_device_flow(self, *, prompt: Optional[str] = None) -> Dict[str, Any]:
+    def acquire_token_device_flow(self, *, prompt: Optional[str] = None, login_hint: Optional[str] = None) -> Dict[str, Any]:
         extra_args = {}
         if prompt:
             extra_args["prompt"] = prompt
+        if login_hint:
+            extra_args["login_hint"] = login_hint
         flow = self.app.initiate_device_flow(scopes=self.config.scopes, **extra_args)
         if "user_code" not in flow:
             msg = "Failed to create device flow"
@@ -58,14 +63,36 @@ class MSALClient:
         self._persist_cache()
         return result
 
-    def acquire_token_silent(self) -> Optional[Dict[str, Any]]:
-        accounts = self.app.get_accounts()
+    def acquire_token_silent(self, account_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        accounts = self._resolve_accounts(account_id)
         if not accounts:
             return None
-        result = self.app.acquire_token_silent(self.config.scopes, account=accounts[0])
+        account = accounts[0]
+        result = self.app.acquire_token_silent(self.config.scopes, account=account)
         if result:
             self._persist_cache()
         return result
+
+    def get_accounts(self) -> list[Dict[str, Any]]:
+        return list(self.app.get_accounts())
+
+    def remove_account(self, account_id: str) -> None:
+        matches = [acct for acct in self.app.get_accounts() if acct.get("home_account_id") == account_id]
+        for account in matches:
+            self.app.remove_account(account)
+        if matches:
+            self._persist_cache()
+
+    def persist_cache_for(self, keyring_account: str, *, cache_path: Optional[Path] = None) -> None:
+        serialized = self._cache.serialize()
+
+        with suppress(KeyringError):
+            keyring.set_password(self.config.keyring_service, keyring_account, serialized)
+
+        target_path = cache_path or self.config.cache_path
+        if target_path:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(serialized, encoding="utf-8")
 
     def clear_cache(self) -> None:
         """Remove cached credentials from keyring and disk."""
@@ -108,4 +135,12 @@ class MSALClient:
         if self.config.cache_path:
             self.config.cache_path.parent.mkdir(parents=True, exist_ok=True)
             self.config.cache_path.write_text(serialized, encoding="utf-8")
+
+    def _resolve_accounts(self, account_id: Optional[str]) -> list[Dict[str, Any]]:
+        accounts: Iterable[Dict[str, Any]] = self.app.get_accounts()
+        if account_id:
+            matches = [acct for acct in accounts if acct.get("home_account_id") == account_id]
+            if matches:
+                return matches
+        return list(accounts)
 
