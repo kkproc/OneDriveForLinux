@@ -264,6 +264,7 @@ def run() -> None:
         window.set_status(f"Synced {node.name}")
         history = store.get_recent_history(cfg.account_id, cfg.remote_id)
         window.update_history(cfg.display_name, history)
+        window.refresh_account_status(cfg.account_id)
 
     def trigger_sync(node: FolderNode) -> None:
         loop.create_task(run_sync(node))
@@ -299,6 +300,7 @@ def run() -> None:
         store.upsert_account(new_account)
         window.set_accounts(store.get_accounts())
         update_engine_account(new_account)
+        window.refresh_account_status(new_account.id)
         window.history_requested.emit(new_account.id, new_account.display_name)
         loop.create_task(populate_root())
 
@@ -307,6 +309,7 @@ def run() -> None:
         if not account:
             return
         update_engine_account(account)
+        window.refresh_account_status(account.id)
         window.history_requested.emit(account.id, account.display_name)
         loop.create_task(populate_root())
 
@@ -325,6 +328,7 @@ def run() -> None:
         new_active = accounts[0]
         window.set_accounts(accounts)
         update_engine_account(new_active)
+        window.refresh_account_status(new_active.id)
         window.history_requested.emit(new_active.id, new_active.display_name)
         loop.create_task(populate_root())
 

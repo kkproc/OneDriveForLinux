@@ -134,3 +134,18 @@ def test_file_state_roundtrip(store: ConfigStore, tmp_path: Path) -> None:
     store.remove_file_state(account.id, "folder", Path("Sub/File1.txt"))
     assert store.get_file_state(account.id, "folder", Path("Sub/File1.txt")) is None
 
+
+def test_get_latest_account_history(store: ConfigStore) -> None:
+    account = AccountRecord(id="acct", username="user@example.com", display_name="User")
+    store.upsert_account(account)
+
+    earlier = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    later = datetime(2024, 1, 2, 13, 30, tzinfo=timezone.utc)
+    store.record_sync_event(account.id, "folder-a", "success", finished_at=earlier)
+    store.record_sync_event(account.id, "folder-b", "error", finished_at=later, error_message="boom")
+
+    latest = store.get_latest_account_history(account.id)
+    assert latest is not None
+    assert latest.status == "error"
+    assert latest.folder_remote_id == "folder-b"
+    assert latest.error_message == "boom"

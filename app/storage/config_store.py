@@ -433,6 +433,26 @@ class ConfigStore:
             for row in rows
         ]
 
+    def get_latest_account_history(self, account_id: str) -> Optional[SyncHistoryRecord]:
+        resolved = _normalize_account_id(account_id)
+        with Session(self.engine, future=True) as session:
+            row = (
+                session.query(SyncHistory)
+                .where(SyncHistory.account_id == resolved)
+                .order_by(SyncHistory.finished_at.desc())
+                .limit(1)
+                .one_or_none()
+            )
+        if not row:
+            return None
+        return SyncHistoryRecord(
+            account_id=row.account_id,
+            folder_remote_id=row.folder_remote_id,
+            finished_at=_ensure_utc(row.finished_at),
+            status=row.status,
+            error_message=row.error_message,
+        )
+
     def update_folder_preferences(
         self,
         account_id: str,

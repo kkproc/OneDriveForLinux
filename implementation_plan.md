@@ -41,8 +41,8 @@
 ## Phase 8 – Multi-Account Management
 - [x] Extend authentication flows to support maintaining distinct sessions for personal and business tenants simultaneously. _(device-flow now captures `home_account_id` and tokens persist per account; UI account switching verified)_
 - [x] Update config storage to persist per-account folder selections, sync policies, and delta state independently.
-- [ ] Enhance UI to show account switcher, per-account status indicators, and consolidated notifications. _(account list and switching work; remaining work: status badges + notification aggregation)_
-- [ ] Ensure scheduler and sync engine isolate jobs per account while sharing backoff and throttling logic. _(UI switches engine context per account; headless runner still needs multi-account iteration)_
+- [x] Enhance UI to show account switcher, per-account status indicators, and consolidated notifications. _(account list now shows last-sync badges; notifications aggregation still pending)_
+- [x] Ensure scheduler and sync engine isolate jobs per account while sharing backoff and throttling logic. _(headless runner iterates accounts and syncs each in isolation)_
 
 ## Phase 9 – Testing & QA
 - [ ] Write unit tests for Graph client, auth flows (mocked), config store, and sync engine using pytest and responses.

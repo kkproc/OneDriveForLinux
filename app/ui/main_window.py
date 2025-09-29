@@ -42,6 +42,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selected_nodes: Dict[str, Tuple[FolderNode, Path, str, str]] = {}
         self._current_node: Optional[FolderNode] = None
         self._accounts: List[AccountRecord] = []
+        self._status_icons: Dict[str, QtGui.QIcon] = {}
         self._suppress_account_change = False
 
         self._init_ui()
@@ -149,8 +150,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.account_list.clear()
         current_index = -1
         for index, account in enumerate(accounts):
-            item = QtWidgets.QListWidgetItem(account.display_name)
+            item = QtWidgets.QListWidgetItem()
             item.setData(QtCore.Qt.UserRole, account)
+            self._apply_account_status(item, account)
             self.account_list.addItem(item)
             if account.id == self.active_account.id:
                 current_index = index
@@ -173,6 +175,8 @@ class MainWindow(QtWidgets.QMainWindow):
             item = self.account_list.item(row)
             item_account: AccountRecord = item.data(QtCore.Qt.UserRole)
             if item_account and item_account.id == account.id:
+                item.setData(QtCore.Qt.UserRole, account)
+                self._apply_account_status(item, account)
                 self.account_list.setCurrentRow(row)
                 break
         self._suppress_account_change = False
@@ -424,6 +428,29 @@ class MainWindow(QtWidgets.QMainWindow):
         can_remove = self.account_list.count() > 1 and self.account_list.currentItem() is not None
         self.remove_account_button.setEnabled(can_remove)
 
+    def refresh_account_status(self, account_id: str) -> None:
+        account = self.store.get_account(account_id)
+        if not account:
+            return
+        for row in range(self.account_list.count()):
+            item = self.account_list.item(row)
+            item_account: AccountRecord = item.data(QtCore.Qt.UserRole)
+            if item_account and item_account.id == account_id:
+                item.setData(QtCore.Qt.UserRole, account)
+                self._apply_account_status(item, account)
+                break
+
+    def refresh_all_account_statuses(self) -> None:
+        for row in range(self.account_list.count()):
+            item = self.account_list.item(row)
+            account: AccountRecord = item.data(QtCore.Qt.UserRole)
+            if not account:
+                continue
+            latest = self.store.get_account(account.id)
+            account_to_use = latest or account
+            item.setData(QtCore.Qt.UserRole, account_to_use)
+            self._apply_account_status(item, account_to_use)
+
     def _show_add_account_dialog(self) -> None:
         if not self._device_flow_handler:
             QtWidgets.QMessageBox.information(self, "Unavailable", "Device login is not configured for this build.")
@@ -431,3 +458,41 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = AddAccountDialog(self, device_flow_handler=self._device_flow_handler)
         dialog.account_added.connect(self.account_created.emit)
         dialog.exec()
+
+    def _apply_account_status(self, item: QtWidgets.QListWidgetItem, account: AccountRecord) -> None:
+        record = self.store.get_latest_account_history(account.id)
+        status_label = "No syncs"
+        tooltip = "No sync history yet."
+        color = QtGui.QColor("#6b7280")
+        if record:
+            when = record.finished_at.astimezone().strftime("%Y-%m-%d %H:%M")
+            status_lower = record.status.lower()
+            is_error = status_lower == "error"
+            status_label = "Error" if is_error else "Synced"
+            tooltip = f"Last sync: {status_label.lower()} at {when}"
+            if record.error_message:
+                tooltip += f"\n{record.error_message}"
+            color = QtGui.QColor("#ef4444" if is_error else "#22c55e")
+        item.setText(f"{account.display_name} ({status_label})")
+        item.setData(QtCore.Qt.ToolTipRole, tooltip)
+        item.setData(QtCore.Qt.StatusTipRole, tooltip)
+        item.setData(QtCore.Qt.AccessibleDescriptionRole, tooltip)
+        item.setIcon(self._status_icon(color))
+
+    def _status_icon(self, color: QtGui.QColor) -> QtGui.QIcon:
+        key = color.name()
+        if key in self._status_icons:
+            return self._status_icons[key]
+        pixmap = QtGui.QPixmap(12, 12)
+        pixmap.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setBrush(QtGui.QBrush(color))
+        pen = QtGui.QPen(QtGui.QColor("#1f2937"))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.drawEllipse(1, 1, 10, 10)
+        painter.end()
+        icon = QtGui.QIcon(pixmap)
+        self._status_icons[key] = icon
+        return icon
